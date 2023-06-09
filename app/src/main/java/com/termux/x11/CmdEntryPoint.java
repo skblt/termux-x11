@@ -1,122 +1,63 @@
 package com.termux.x11;
 
+import static android.system.Os.getuid;
+
 import android.annotation.SuppressLint;
+import android.app.IActivityManager;
+import android.app.PendingIntent;
 import android.content.Context;
+import android.content.IIntentReceiver;
+import android.content.IIntentSender;
 import android.content.Intent;
 import android.os.Bundle;
 import android.os.Handler;
+import android.os.IBinder;
 import android.os.Looper;
 import android.os.ParcelFileDescriptor;
 import android.util.Log;
+import android.view.Surface;
 
 import java.io.DataInputStream;
-import java.io.File;
-import java.io.RandomAccessFile;
 import java.lang.reflect.InvocationTargetException;
 import java.net.InetAddress;
 import java.net.ServerSocket;
 import java.net.Socket;
-import java.nio.channels.FileLock;
 import java.util.Arrays;
-import java.util.List;
 
+@SuppressLint("StaticFieldLeak")
 public class CmdEntryPoint extends ICmdEntryInterface.Stub {
     public static final String ACTION_START = "com.termux.x11.CmdEntryPoint.ACTION_START";
     public static final int PORT = 7892;
     public static final byte[] MAGIC = "0xDEADBEEF".getBytes();
-
-    // this constant is used in Xwayland itself
-    // https://github.com/freedesktop/xorg-xserver/blob/ccdd431cd8f1cabae9d744f0514b6533c438908c/hw/xwayland/xwayland-screen.c#L66
-    public static final int DEFAULT_DPI = 96;
-
-    @SuppressWarnings("FieldCanBeLocal")
-    @SuppressLint("StaticFieldLeak")
-    private static Handler handler;
-    private final Context ctx;
+    private static final Handler handler = new Handler();
+    public static Context ctx;
 
     /**
      * Command-line entry point.
-     * [1]
-     * Application creates socket with name $WAYLAND_DISPLAY in folder $XDG_RUNTIME_DIR
-     * If these environment variables are unset they are specified as
-     * WAYLAND_DISPLAY="termux-x11"
-     * XDG_RUNTIME_DIR="/data/data/com.termux/files/usr/tmp"
-     * Any commandline arguments passed to this program are passed to Xwayland.
-     * The only exception is `--no-xwayland-start`, read [4].
-     *
-     * [2]
-     * Please, do not set WAYLAND_DISPLAY to "wayland-0", lots of programs (primarily GTK-based)
-     * are trying to connect the compositor and crashing. Compositor in termux-x11 is a fake and a stub.
-     * It is only designed to handle Xwayland.
-     *
-     * [3]
-     * Also you should set TMPDIR environment variable in the case if you are running Xwayland in
-     * non-termux environment. That is the only way to localize X connection socket.
-     * TMPDIR should be accessible by termux-x11.
-     *
-     * [4]
-     * You can run `termux-x11 :0 --no-xwayland-start` to spawn compositor, but not to spawn Termux's
-     * Xwayland in the case you want to use Xwayland contained in chroot environment.
-     * Do not forget about [2] to avoid application crashes.
-     * Also you must specify the same display number you will set to Xwayland.
-     * You must start `termux-x11` as root if you want to make it work with chroot'd Xwayland.
-     * `root@termux: ~# WAYLAND_DISPLAY="termux-x11" XDG_RUNTIME_DIR=/<chroot path>/var/run/1000/ TMDIR=/<chroot path>/tmp/ termux-x11 :0 --no-xwayland-start`
-     * `root@chroot: ~# WAYLAND_DISPLAY="termux-x11" XDG_RUNTIME_DIR=/<chroot path>/var/run/1000/ TMDIR=/<chroot path>/tmp/ Xwayland :0 -ac`
-     *
-     * [5]
-     * You can specify DPI by using `-dpi` option.
-     * It is Xwayland option, but termux-x11 also handles it.
-     *
-     * [6]
-     * Start termux-x11 with TERMUX_X11_DEBUG=1 flag to redirect Termux:X11 logcat to termux-x11 stderr.
-     * `env TERMUX_X11_DEBUG=1 termux-x11 :0 -ac`
      *
      * @param args The command-line arguments
      */
     public static void main(String[] args) {
-        setArgV0("termux-x11");
-        if (!lockInstance("termux-x11.lock")) {
-            System.err.println("termux-x11 is already running. You can kill it with command `pkill -9 Xwayland`");
-            return;
-        }
-
-        handler = new Handler();
         handler.post(() -> new CmdEntryPoint(args));
         Looper.loop();
     }
 
-    @SuppressWarnings("FieldCanBeLocal")
-    private int dpi = DEFAULT_DPI;
-    @SuppressWarnings("FieldCanBeLocal")
-    private int display = 0;
-
     CmdEntryPoint(String[] args) {
-        ctx = android.app.ActivityThread.systemMain().getSystemContext();
-
-        List<String> a = Arrays.asList(args);
         try {
-            int dpiIndex = a.lastIndexOf("-dpi");
-            if (dpiIndex != -1 && a.size() >= dpiIndex)
-                dpi = Integer.parseInt(a.get(dpiIndex + 1));
-        } catch (NumberFormatException ignored) {} // No need to handle it, anyway user will see Xwayland error
+            if (ctx == null)
+                ctx = android.app.ActivityThread.systemMain().getSystemContext();
+        } catch (Exception e) {
+            Log.e("CmdEntryPoint", "Problem during obtaining Context: ", e);
+        }
 
-        try {
-            for (String arg: a)
-                if (arg.startsWith(":"))
-                    display = Integer.parseInt(arg.substring(1));
-        } catch (NumberFormatException ignored) {} // No need to handle it, anyway user will see Xwayland error
+        if (!start(args))
+            System.exit(1);
 
-        spawnCompositor(display, dpi);
         spawnListeningThread();
         sendBroadcast();
-
-        if (!a.contains("--no-xwayland-start")) {
-            System.err.println("Starting Xwayland");
-            exec(args);
-        }
     }
 
-    @SuppressLint("WrongConstant")
+    @SuppressLint({"WrongConstant", "PrivateApi"})
     void sendBroadcast() {
         // We should not care about multiple instances, it should be called only by `Termux:X11` app
         // which is single instance...
@@ -127,11 +68,43 @@ public class CmdEntryPoint extends ICmdEntryInterface.Stub {
         intent.putExtra("", bundle);
         intent.setPackage("com.termux.x11");
 
-        if (getuid() == 0 || getuid() == 2000) {
-            intent.setFlags(/* FLAG_RECEIVER_FROM_SHELL */ 0x00400000);
-        }
+        if (getuid() == 0 || getuid() == 2000)
+            intent.setFlags(0x00400000 /* FLAG_RECEIVER_FROM_SHELL */);
 
-        ctx.sendBroadcast(intent);
+        try {
+            ctx.sendBroadcast(intent);
+        } catch (IllegalArgumentException e) {
+            String packageName = ctx.getPackageManager().getPackagesForUid(getuid())[0];
+            IActivityManager am;
+            try {
+                //noinspection JavaReflectionMemberAccess
+                am = (IActivityManager) android.app.ActivityManager.class
+                        .getMethod("getService")
+                        .invoke(null);
+            } catch (Exception e2) {
+                try {
+                    am = (IActivityManager) Class.forName("android.app.ActivityManagerNative")
+                            .getMethod("getDefault")
+                            .invoke(null);
+                } catch (Exception e3) {
+                    throw new RuntimeException(e3);
+                }
+            }
+
+            assert am != null;
+            IIntentSender sender = am.getIntentSender(1, packageName, null, null, 0, new Intent[] { intent },
+                    null, PendingIntent.FLAG_CANCEL_CURRENT | PendingIntent.FLAG_ONE_SHOT, null, 0);
+            IIntentReceiver.Stub receiver = new IIntentReceiver.Stub() {
+                @Override public void performReceive(Intent intent, int resultCode, String data, Bundle extras, boolean ordered, boolean sticky, int sendingUser) {}
+            };
+            try {
+                IIntentSender.class
+                        .getMethod("send", int.class, Intent.class, String.class, IBinder.class, IIntentReceiver.class, String.class, Bundle.class)
+                        .invoke(sender, 0, intent, null, null, receiver, null, null);
+            } catch (Exception ex) {
+                throw new RuntimeException(ex);
+            }
+        }
     }
 
     void spawnListeningThread() {
@@ -142,18 +115,19 @@ public class CmdEntryPoint extends ICmdEntryInterface.Stub {
                 received the intent. To allow the application to reconnect freely, we will listen on
                 port `PORT` and when receiving a magic phrase, we will send another intent.
              */
+            Log.e("CmdEntryPoint", "Listening port " + PORT);
             try (ServerSocket listeningSocket =
                          new ServerSocket(PORT, 0, InetAddress.getByName("127.0.0.1"))) {
                 listeningSocket.setReuseAddress(true);
                 while(true) {
                     try (Socket client = listeningSocket.accept()) {
-                        System.err.println("Somebody connected!");
+                        Log.e("CmdEntryPoint", "Somebody connected!");
                         // We should ensure that it is some
                         byte[] b = new byte[MAGIC.length];
                         DataInputStream reader = new DataInputStream(client.getInputStream());
                         reader.readFully(b);
                         if (Arrays.equals(MAGIC, b)) {
-                            System.err.println("New client connection!");
+                            Log.e("CmdEntryPoint", "New client connection!");
                             sendBroadcast();
                         }
                     } catch (Exception e) {
@@ -177,76 +151,12 @@ public class CmdEntryPoint extends ICmdEntryInterface.Stub {
         }).start();
     }
 
-    private static boolean lockInstance(@SuppressWarnings("SameParameterValue") final String lockName) {
-        try {
-            final File file = new File(System.getenv("TMPDIR") + "/" + lockName);
-            //noinspection resource
-            final RandomAccessFile randomAccessFile = new RandomAccessFile(file, "rw");
-            final FileLock fileLock = randomAccessFile.getChannel().tryLock();
-            if (fileLock != null) {
-                Runtime.getRuntime().addShutdownHook(new Thread() {
-                    public void run() {
-                        try {
-                            fileLock.release();
-                            randomAccessFile.close();
-                            //noinspection ResultOfMethodCallIgnored
-                            file.delete();
-                        } catch (Exception e) {
-                            System.err.println("Unable to remove lock file: " + lockName);
-                            e.printStackTrace();
-                        }
-                    }
-                });
-                return true;
-            }
-        } catch (Exception e) {
-            System.err.println("Unable to create and/or lock file: " + lockName);
-            e.printStackTrace();
-        }
-        return false;
-    }
-
-    private static void setArgV0(@SuppressWarnings("SameParameterValue") String name) {
-        try {
-            //noinspection JavaReflectionMemberAccess
-            Process.class.
-                    getDeclaredMethod("setArgv0", String.class).
-                    invoke(null, name);
-        } catch (NoSuchMethodException | InvocationTargetException | IllegalAccessException e) {
-            Log.e("CmdEntryPoint", "Failed to invoke `Process.setArgv0`", e);
-        }
-
-        try {
-            Class.forName("dalvik.system.VMRuntime").
-                    getMethod("setProcessPackageName", String.class).
-                    invoke(null, name);
-        } catch (NoSuchMethodException | InvocationTargetException | IllegalAccessException |
-                 ClassNotFoundException e) {
-            Log.e("CmdEntryPoint", "Failed to invoke `VMRuntime.setProcessPackageName`", e);
-        }
-    }
-
-    @Override
-    public ParcelFileDescriptor getXConnection() {
-        int fd = connect();
-        return fd == -1 ? null : ParcelFileDescriptor.adoptFd(fd);
-    }
-
-    @Override
-    public ParcelFileDescriptor getLogcatOutput() {
-        int fd = stderr();
-        return fd == -1 ? null : ParcelFileDescriptor.adoptFd(fd);
-    }
-
-    private native void spawnCompositor(int display, int dpi);
-    public native void outputResize(int width, int height);
-    private static native boolean socketExists();
-    private static native void exec(String[] argv);
-    private static native int connect();
-    private static native int stderr();
-    private static native int getuid();
+    public static native boolean start(String[] args);
+    public native void windowChanged(Surface surface);
+    public native ParcelFileDescriptor getXConnection();
+    public native ParcelFileDescriptor getLogcatOutput();
 
     static {
-        System.loadLibrary("lorie");
+        System.loadLibrary("Xlorie");
     }
 }

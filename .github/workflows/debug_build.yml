@@ -15,11 +15,15 @@ jobs:
     steps:
     - name: Install dependencies
       run: |
-        sudo apt install -y libarchive-tools libwayland-bin
+        sudo apt install -y libarchive-tools meson ninja-build python3-mako
     - name: Clone repository
       uses: actions/checkout@v3
       with:
         submodules: recursive
+    - uses: actions/setup-java@v3
+      with:
+        distribution: 'temurin'
+        java-version: '17'
         
     - name: Restore cache
       uses: actions/cache@v3
@@ -38,8 +42,45 @@ jobs:
     - name: Build companion package
       run: |
         ./build_termux_package
-    - name: Store generated APK file
+    - name: Copy loader to target directory
+      run: |
+        cp ./shell-loader/build/outputs/apk/debug/shell-loader-debug.apk ./app/build/outputs/apk/debug/shell-loader-nightly.apk
+    - name: Store app-arm64-v8a-debug
       uses: actions/upload-artifact@v3
       with:
-        name: termux-x11
-        path: ./app/build/outputs/apk/debug
+        name: termux-x11-arm64-v8a-debug
+        path: ./app/build/outputs/apk/debug/app-arm64-v8a-debug.apk
+    
+    - name: Store app-armeabi-v7a-debug
+      uses: actions/upload-artifact@v3
+      with:
+        name: termux-x11-armeabi-v7a-debug
+        path: ./app/build/outputs/apk/debug/app-armeabi-v7a-debug.apk
+    
+    - name: Store app-universal-debug
+      uses: actions/upload-artifact@v3
+      with:
+        name: termux-x11-universal-debug
+        path: ./app/build/outputs/apk/debug/app-universal-debug.apk
+    
+    - name: Store app-x86_64-debug
+      uses: actions/upload-artifact@v3
+      with:
+        name: termux-x11-x86_64-debug
+        path: ./app/build/outputs/apk/debug/app-x86_64-debug.apk
+    
+    - name: Store app-x86-debug
+      uses: actions/upload-artifact@v3
+      with:
+        name: termux-x11-x86-debug
+        path: ./app/build/outputs/apk/debug/app-x86-debug.apk
+    
+    - name: Store companion package
+      uses: actions/upload-artifact@v3
+      with:
+        name: termux-companion packages
+        path: |
+          ./app/build/outputs/apk/debug/shell-loader-nightly.apk
+          ./app/build/outputs/apk/debug/termux-x11-*-all.deb
+          ./app/build/outputs/apk/debug/termux-x11-*-any.pkg.tar.xz
+        
