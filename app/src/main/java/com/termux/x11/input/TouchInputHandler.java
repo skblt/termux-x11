@@ -18,6 +18,7 @@ import android.view.View;
 import android.view.ViewConfiguration;
 
 import androidx.annotation.IntDef;
+import androidx.core.math.MathUtils;
 
 import java.lang.annotation.Retention;
 import java.lang.annotation.RetentionPolicy;
@@ -150,7 +151,19 @@ public class TouchInputHandler {
                 ((event.getSource() & InputDevice.SOURCE_TOUCHPAD) != InputDevice.SOURCE_TOUCHPAD);
     }
 
-    public boolean handleTouchEvent(View view, MotionEvent event) {
+    public boolean handleTouchEvent(View view0, View view, MotionEvent event) {
+        if (view0 != view) {
+            int[] view0Location = new int[2];
+            int[] viewLocation = new int[2];
+
+            view0.getLocationOnScreen(view0Location);
+            view.getLocationOnScreen(viewLocation);
+
+            int offsetX = viewLocation[0] - view0Location[0];
+            int offsetY = viewLocation[1] - view0Location[1];
+
+            event.offsetLocation(-offsetX, -offsetY);
+        }
         android.util.Log.d("TOUCHHANDLER", "EVENT " + (mTouchpadHandler != null) + " " + isDexEvent(event) + " " + event);
         if (!view.isFocused() && event.getAction() == MotionEvent.ACTION_DOWN)
             view.requestFocus();
@@ -166,7 +179,7 @@ public class TouchInputHandler {
             // Regular touchpads and Dex touchpad send events as finger too,
             // but they should be handled as touchscreens with trackpad mode.
             if (mTouchpadHandler != null && (event.getSource() & InputDevice.SOURCE_TOUCHPAD) == InputDevice.SOURCE_TOUCHPAD)
-                return mTouchpadHandler.handleTouchEvent(view, event);
+                return mTouchpadHandler.handleTouchEvent(view, view, event);
 
             // Give the underlying input strategy a chance to observe the current motion event before
             // passing it to the gesture detectors.  This allows the input strategy to react to the
@@ -188,6 +201,13 @@ public class TouchInputHandler {
                     mIsDragging = false;
                     break;
 
+                case MotionEvent.ACTION_SCROLL:
+                    float scrollY = -100 * event.getAxisValue(MotionEvent.AXIS_VSCROLL);
+                    float scrollX = -100 * event.getAxisValue(MotionEvent.AXIS_HSCROLL);
+
+                    mInjector.sendMouseWheelEvent(scrollX, scrollY);
+                    return true;
+
                 case MotionEvent.ACTION_POINTER_DOWN:
                     mTotalMotionY = 0;
                     break;
@@ -204,7 +224,7 @@ public class TouchInputHandler {
     public boolean handleCapturedEvent(View v, MotionEvent e) {
         if ((e.getSource() & InputDevice.SOURCE_TOUCHPAD) == InputDevice.SOURCE_TOUCHPAD) {
             if (mTouchpadHandler != null)
-                mTouchpadHandler.handleTouchEvent(v, e);
+                mTouchpadHandler.handleTouchEvent(v, v, e);
             return true;
         }
 
@@ -213,8 +233,17 @@ public class TouchInputHandler {
             case MotionEvent.ACTION_MOVE:
                 if (e.getX() == 0 && e.getY() == 0)
                     return true;
-//                mInjector.sendMouseEvent(new PointF(e.getX(), e.getY()), InputStub.BUTTON_UNDEFINED, false, true);
-                moveCursorByOffset(-e.getX()*2, -e.getY()*2);
+
+                PointF newPos = mRenderData.getCursorPosition();
+                newPos.offset(e.getX()*2, e.getY()*2);
+                newPos.set(
+                        MathUtils.clamp(newPos.x, 0, mRenderData.screenWidth),
+                        MathUtils.clamp(newPos.y, 0, mRenderData.screenHeight));
+                boolean cursorMoved = mRenderData.setCursorPosition(newPos.x, newPos.y);
+                if (cursorMoved)
+                    mInjector.sendCursorMove(mRenderData.getCursorPosition());
+
+                mRenderStub.moveCursor(mRenderData.getCursorPosition());
                 break;
             case MotionEvent.ACTION_BUTTON_PRESS:
                 mInjector.sendMouseDown(mRenderData.getCursorPosition(), button);
@@ -249,6 +278,8 @@ public class TouchInputHandler {
 
         if (mTouchpadHandler != null)
             mTouchpadHandler.handleClientSizeChanged(w, h);
+
+        moveCursorToScreenPoint((float) w / 2, (float) h / 2);
     }
 
     public void handleHostSizeChanged(int w, int h) {
@@ -284,15 +315,7 @@ public class TouchInputHandler {
     private void moveCursorByOffset(float deltaX, float deltaY) {
         PointF cursorPos = mRenderData.getCursorPosition();
         cursorPos.offset(-deltaX, -deltaY);
-        if (cursorPos.x < 0)
-            cursorPos.x = 0;
-        if (cursorPos.y < 0)
-            cursorPos.y = 0;
-        if (cursorPos.x > mRenderData.screenWidth)
-            cursorPos.x = mRenderData.screenWidth;
-        if (cursorPos.y > mRenderData.screenHeight)
-            cursorPos.y = mRenderData.screenHeight;
-        moveCursor(cursorPos.x, cursorPos.y);
+        moveCursor(MathUtils.clamp(cursorPos.x, 0, mRenderData.screenWidth), MathUtils.clamp(cursorPos.y, 0, mRenderData.screenHeight));
     }
 
     /** Moves the cursor to the specified position on the screen. */
@@ -361,11 +384,11 @@ public class TouchInputHandler {
             // Check to see if the motion originated at the edge of the screen.
             // If so, then the user is likely swiping in to display system UI.
             // Also we should check if we are in touchpad handler since it can send events in coordinates of itself
-            if (!mPanGestureBounds.contains((int) e1.getX(), (int) e1.getY()) && mTouchpadHandler != null) {
-                // Prevent the cursor being moved or flung by the gesture.
-                mSuppressCursorMovement = true;
-                return false;
-            }
+//            if (!mPanGestureBounds.contains((int) e1.getX(), (int) e1.getY())) {
+//                 // Prevent the cursor being moved or flung by the gesture.
+//                mSuppressCursorMovement = true;
+//                return false;
+//            }
 
             if (pointerCount >= 3 && !mSwipeCompleted) {
                 // Note that distance values are reversed. For example, dragging a finger in the

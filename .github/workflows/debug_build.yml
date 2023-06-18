@@ -15,7 +15,7 @@ jobs:
     steps:
     - name: Install dependencies
       run: |
-        sudo apt install -y libarchive-tools meson ninja-build python3-mako
+        sudo apt update && sudo apt install -y libarchive-tools meson ninja-build python3-mako binutils-aarch64-linux-gnu binutils-arm-linux-gnueabihf
     - name: Clone repository
       uses: actions/checkout@v3
       with:
@@ -84,3 +84,9 @@ jobs:
           ./app/build/outputs/apk/debug/termux-x11-*-all.deb
           ./app/build/outputs/apk/debug/termux-x11-*-any.pkg.tar.xz
         
+    - name: Store unstripped libraries with debug symbols
+      uses: actions/upload-artifact@v3
+      with:
+        name: termux-x11-unstripped-libraries-for-ndk-stack
+        path: ./app/build/intermediates/cxx/Debug/*
+    

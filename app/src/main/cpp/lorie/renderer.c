@@ -10,7 +10,6 @@
 #include <EGL/eglext.h>
 #include <GLES2/gl2.h>
 #include <GLES2/gl2ext.h>
-#include <GL/gl.h>
 #include <android/native_window.h>
 #include <android/log.h>
 #include <dlfcn.h>
@@ -22,9 +21,10 @@
 
 static GLuint create_program(const char* p_vertex_source, const char* p_fragment_source);
 
-static void eglCheckError(int line) {
+static int eglCheckError(int line) {
     char* desc;
-    switch(eglGetError()) {
+    int err = eglGetError();
+    switch(err) {
 #define E(code, text) case code: desc = (char*) text; break
         case EGL_SUCCESS: desc = NULL; // "No error"
         E(EGL_NOT_INITIALIZED, "EGL not initialized or failed to initialize");
@@ -47,6 +47,32 @@ static void eglCheckError(int line) {
 
     if (desc)
         log("Xlorie: egl error on line %d: %s\n", line, desc);
+
+    return err;
+}
+
+static const char* eglErrorLabel(int code) {
+    switch(code) {
+        case EGL_SUCCESS: return NULL; // "No error"
+#define E(code) case code: return #code; break
+        E(EGL_NOT_INITIALIZED);
+        E(EGL_BAD_ACCESS);
+        E(EGL_BAD_ALLOC);
+        E(EGL_BAD_ATTRIBUTE);
+        E(EGL_BAD_CONTEXT);
+        E(EGL_BAD_CONFIG);
+        E(EGL_BAD_CURRENT_SURFACE);
+        E(EGL_BAD_DISPLAY);
+        E(EGL_BAD_SURFACE);
+        E(EGL_BAD_MATCH);
+        E(EGL_BAD_PARAMETER);
+        E(EGL_BAD_NATIVE_PIXMAP);
+        E(EGL_BAD_NATIVE_WINDOW);
+        E(EGL_CONTEXT_LOST);
+#undef E
+        default: return "EGL_UNKNOWN_ERROR";
+    }
+
 }
 
 static void checkGlError(int line) {
@@ -88,7 +114,7 @@ static const char fragment_shader[] =
     "varying vec2 outTexCoords;\n"
     "uniform sampler2D texture;\n"
     "void main(void) {\n"
-    "   gl_FragColor = texture2D(texture, outTexCoords).bgra;\n"
+    "   gl_FragColor = texture2D(texture, outTexCoords);\n"
     "}\n";
 
 static EGLDisplay egl_display = EGL_NO_DISPLAY;
@@ -96,6 +122,7 @@ static EGLContext ctx = EGL_NO_CONTEXT;
 static EGLSurface sfc = EGL_NO_SURFACE;
 static EGLConfig cfg = 0;
 static EGLNativeWindowType win = 0;
+static AHardwareBuffer *buffer = NULL;
 static EGLImageKHR image = NULL;
 static int renderedFrames = 0;
 
@@ -130,14 +157,15 @@ int renderer_init(void) {
         return 1;
 
     egl_display = eglGetDisplay(EGL_DEFAULT_DISPLAY);
-    eglCheckError(__LINE__);
     if (egl_display == EGL_NO_DISPLAY) {
         log("Xlorie: Got no EGL display.\n");
+        eglCheckError(__LINE__);
         return 0;
     }
 
     if (eglInitialize(egl_display, &major, &minor) != EGL_TRUE) {
         log("Xlorie: Unable to initialize EGL\n");
+        eglCheckError(__LINE__);
         return 0;
     }
     log("Xlorie: Initialized EGL version %d.%d\n", major, minor);
@@ -170,13 +198,22 @@ int renderer_init(void) {
     return 1;
 }
 
-void renderer_set_buffer(AHardwareBuffer* buffer) {
+void renderer_set_buffer(AHardwareBuffer* buf) {
     const EGLint imageAttributes[] = {EGL_IMAGE_PRESERVED_KHR, EGL_TRUE, EGL_NONE};
     EGLClientBuffer clientBuffer;
     AHardwareBuffer_Desc desc = {0};
-    __android_log_print(ANDROID_LOG_DEBUG, "XlorieTest2", "renderer_set_buffer0");
+
+
+    if (eglGetCurrentContext() == EGL_NO_CONTEXT)
+        return;
+
+    log("renderer_set_buffer0");
     if (image)
         eglDestroyImageKHR(egl_display, image);
+    if (buffer)
+        AHardwareBuffer_release(buffer);
+
+    buffer = buf;
 
     glBindTexture(GL_TEXTURE_2D, display.id); checkGlError();
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR); checkGlError();
@@ -184,29 +221,33 @@ void renderer_set_buffer(AHardwareBuffer* buffer) {
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE); checkGlError();
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE); checkGlError();
     if (buffer) {
+        AHardwareBuffer_acquire(buffer);
         AHardwareBuffer_describe(buffer, &desc);
 
         display.width = (float) desc.width;
         display.height = (float) desc.height;
 
-        clientBuffer = eglGetNativeClientBufferANDROID(buffer); eglCheckError(__LINE__);
+        clientBuffer = eglGetNativeClientBufferANDROID(buffer);
+        if (!clientBuffer)
+            eglCheckError(__LINE__);
         image = clientBuffer ? eglCreateImageKHR(egl_display, EGL_NO_CONTEXT, EGL_NATIVE_BUFFER_ANDROID, clientBuffer, imageAttributes) : NULL;
-        eglCheckError(__LINE__);
-        if (clientBuffer) {
+        if (!image)
+            eglCheckError(__LINE__);
+        if (image)
             glEGLImageTargetTexture2DOES(GL_TEXTURE_2D, image); checkGlError();
-        }
     } else {
         uint32_t data = {0};
         glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 1, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, &data); checkGlError();
     }
+
     renderer_redraw();
 
-    __android_log_print(ANDROID_LOG_DEBUG, "XlorieTest2", "renderer_set_buffer %p %d %d", buffer, desc.width, desc.height);
+    log("renderer_set_buffer %p %d %d", buffer, desc.width, desc.height);
 }
 
 void renderer_set_window(EGLNativeWindowType window) {
-    __android_log_print(ANDROID_LOG_DEBUG, "XlorieTest2", "renderer_set_window %p %d %d", window, win ? ANativeWindow_getWidth(win) : 0, win ? ANativeWindow_getHeight(win) : 0);
-    if (win == window)
+    log("renderer_set_window %p %d %d", window, window ? ANativeWindow_getWidth(window) : 0, window ? ANativeWindow_getHeight(window) : 0);
+    if (window && win == window)
         return;
 
     if (sfc != EGL_NO_SURFACE) {
@@ -221,6 +262,7 @@ void renderer_set_window(EGLNativeWindowType window) {
             return;
         }
     }
+    sfc = EGL_NO_SURFACE;
 
     if (win)
         ANativeWindow_release(win);
@@ -228,11 +270,6 @@ void renderer_set_window(EGLNativeWindowType window) {
 
     if (!win)
         return;
-
-    ANativeWindow_setBuffersGeometry(win,
-            ANativeWindow_getWidth(win),
-            ANativeWindow_getHeight(win),
-            AHARDWAREBUFFER_FORMAT_R8G8B8X8_UNORM);
 
     sfc = eglCreateWindowSurface(egl_display, cfg, win, NULL);
     if (sfc == EGL_NO_SURFACE) {
@@ -247,7 +284,7 @@ void renderer_set_window(EGLNativeWindowType window) {
         return;
     }
 
-    if (sfc && !g_texture_program) {
+    if (!g_texture_program) {
         g_texture_program = create_program(vertex_shader, fragment_shader);
         if (!g_texture_program) {
             log("Xlorie: GLESv2: Unable to create shader program.\n");
@@ -270,9 +307,6 @@ void renderer_set_window(EGLNativeWindowType window) {
 
     log("Xlorie: new surface applied: %p\n", sfc);
 
-    if (!sfc)
-        return;
-
     glClearColor(1.f, 0.f, 0.f, 0.0f); checkGlError();
     glClear(GL_COLOR_BUFFER_BIT); checkGlError();
     renderer_redraw();
@@ -281,6 +315,10 @@ void renderer_set_window(EGLNativeWindowType window) {
 maybe_unused void renderer_upload(int w, int h, void* data) {
     display.width = (float) w;
     display.height = (float) h;
+
+    if (eglGetCurrentContext() == EGL_NO_CONTEXT)
+        return;
+
     glBindTexture(GL_TEXTURE_2D, display.id); checkGlError();
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST); checkGlError();
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST); checkGlError();
@@ -288,6 +326,8 @@ maybe_unused void renderer_upload(int w, int h, void* data) {
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE); checkGlError();
 
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, data); checkGlError();
+
+    glFlush();
 }
 
 maybe_unused void renderer_update_rects(int width, maybe_unused int height, pixman_box16_t *rects, int amount, void* data) {
@@ -295,6 +335,10 @@ maybe_unused void renderer_update_rects(int width, maybe_unused int height, pixm
     uint32_t* d;
     display.width = (float) width;
     display.height = (float) height;
+
+    if (eglGetCurrentContext() == EGL_NO_CONTEXT)
+        return;
+
     glBindTexture(GL_TEXTURE_2D, display.id); checkGlError();
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST); checkGlError();
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST); checkGlError();
@@ -307,6 +351,8 @@ maybe_unused void renderer_update_rects(int width, maybe_unused int height, pixm
             w = rects[i].x2 - rects[i].x1;
             glTexSubImage2D(GL_TEXTURE_2D, 0, rects[i].x1, j, w, 1, GL_RGBA, GL_UNSIGNED_BYTE, d); checkGlError();
         }
+
+    glFlush();
 }
 
 void renderer_update_cursor(int w, int h, int xhot, int yhot, void* data) {
@@ -315,6 +361,9 @@ void renderer_update_cursor(int w, int h, int xhot, int yhot, void* data) {
     cursor.height = (float) h;
     cursor.xhot = (float) xhot;
     cursor.yhot = (float) yhot;
+
+    if (eglGetCurrentContext() == EGL_NO_CONTEXT || !cursor.width || !cursor.height)
+        return;
 
     glBindTexture(GL_TEXTURE_2D, cursor.id); checkGlError();
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR); checkGlError();
@@ -336,26 +385,36 @@ static void draw_cursor(void);
 float ia = 0;
 
 int renderer_should_redraw(void) {
-    return sfc != EGL_NO_SURFACE;
+    return sfc != EGL_NO_SURFACE && eglGetCurrentContext() != EGL_NO_CONTEXT;
 }
 
 int renderer_redraw(void) {
-    if (!sfc)
+    int err = EGL_SUCCESS;
+
+    if (!sfc || eglGetCurrentContext() == EGL_NO_CONTEXT)
         return FALSE;
 
     draw(display.id,  -1.f, -1.f, 1.f, 1.f);
     draw_cursor();
-    eglSwapBuffers(egl_display, sfc); checkGlError();
-    if (eglGetError() == EGL_SUCCESS) {
-        renderedFrames++;
-        return TRUE;
-    } else
-        return FALSE;
+    if (eglSwapBuffers(egl_display, sfc) != EGL_TRUE) {
+        err = eglGetError();
+        eglCheckError(__LINE__);
+        if (err == EGL_BAD_NATIVE_WINDOW || err == EGL_BAD_SURFACE) {
+            log("We've got %s so window is to be destroyed. "
+                "Native window disconnected/abandoned, probably activity is destroyed or in background",
+                eglErrorLabel(err));
+            renderer_set_window(NULL);
+            return FALSE;
+        }
+    }
+
+    renderedFrames++;
+    return TRUE;
 }
 
 void renderer_print_fps(float millis) {
     if (renderedFrames)
-        __android_log_print(ANDROID_LOG_VERBOSE, "LorieNative", "%d frames in %.1f seconds = %.1f FPS",
+        log("%d frames in %.1f seconds = %.1f FPS",
                                 renderedFrames, millis / 1000, (float) renderedFrames *  1000 / millis);
     renderedFrames = 0;
 }
@@ -439,6 +498,10 @@ static void draw(GLuint id, float x0, float y0, float x1, float y1) {
 
 maybe_unused static void draw_cursor(void) {
     float x, y, w, h;
+
+    if (!cursor.width || !cursor.height)
+        return;
+
     x = 2.f * (cursor.x - cursor.xhot) / display.width - 1.f;
     y = 2.f * (cursor.y - cursor.yhot) / display.height - 1.f;
     w = 2.f * cursor.width / display.width;
