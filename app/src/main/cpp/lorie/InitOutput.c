@@ -34,6 +34,7 @@ from The Open Group.
 #pragma ide diagnostic ignored "ConstantFunctionResult"
 #pragma ide diagnostic ignored "bugprone-integer-division"
 #pragma clang diagnostic ignored "-Wmissing-noreturn"
+#pragma clang diagnostic ignored "-Wformat-nonliteral"
 
 #ifdef HAVE_DIX_CONFIG_H
 #include <dix-config.h>
@@ -48,6 +49,7 @@ from The Open Group.
 #include <android/log.h>
 #include <android/native_window.h>
 #include <android/hardware_buffer.h>
+#include <sys/wait.h>
 #include "scrnintstr.h"
 #include "servermd.h"
 #include "fb.h"
@@ -60,6 +62,7 @@ from The Open Group.
 #include "randrstr.h"
 #include "damagestr.h"
 #include "cursorstr.h"
+#include "shmint.h"
 
 #include "renderer.h"
 #include "inpututils.h"
@@ -105,16 +108,47 @@ ddxGiveUp(unused enum ExitCode error) {
     exit(error);
 }
 
+static void* ddxReadyThread(unused void* cookie) {
+    if (xstartup && serverGeneration == 1) {
+        pid_t pid = fork();
+
+        if (!pid) {
+            char DISPLAY[16] = "";
+            sprintf(DISPLAY, ":%s", display);
+            setenv("DISPLAY", DISPLAY, 1);
+            execlp("sh", "sh", "-c", xstartup, NULL);
+            dprintf(2, "Failed to start command `sh -c \"%s\"`: %s\n", xstartup, strerror(errno));
+            abort();
+        } else {
+            int status;
+            do {
+                pid_t w = waitpid(pid, &status, 0);
+                if (w == -1) {
+                    perror("waitpid");
+                    raise(SIGKILL);
+                }
+
+                if (WIFEXITED(status)) {
+                    printf("%d exited, status=%d\n", w, WEXITSTATUS(status));
+                } else if (WIFSIGNALED(status)) {
+                    printf("%d killed by signal %d\n", w, WTERMSIG(status));
+                } else if (WIFSTOPPED(status)) {
+                    printf("%d stopped by signal %d\n", w, WSTOPSIG(status));
+                } else if (WIFCONTINUED(status)) {
+                    printf("%d continued\n", w);
+                }
+            } while (!WIFEXITED(status) && !WIFSIGNALED(status));
+            raise(SIGINT);
+        }
+    }
+
+    return NULL;
+}
+
 void
 ddxReady(void) {
-    if (xstartup && serverGeneration == 1 && !fork()) {
-        char DISPLAY[16] = "";
-        sprintf(DISPLAY, ":%s", display);
-        setenv("DISPLAY", DISPLAY, 1);
-        execlp("sh", "sh", "-c", xstartup, NULL);
-        dprintf(2, "Failed to start command `sh -c \"%s\"`: %s\n", xstartup, strerror(errno));
-        abort();
-    }
+    pthread_t t;
+    pthread_create(&t, NULL, ddxReadyThread, NULL);
 }
 
 void
@@ -363,7 +397,7 @@ static Bool lorieCreateScreenResources(ScreenPtr pScreen) {
     if (!ret)
         return FALSE;
 
-    pScreen->devPrivate = pScreen->CreatePixmap(pScreen, 0, 0, pScreen->rootDepth, CREATE_PIXMAP_USAGE_BACKING_PIXMAP);
+    pScreen->devPrivate = fbCreatePixmap(pScreen, 0, 0, pScreen->rootDepth, CREATE_PIXMAP_USAGE_BACKING_PIXMAP);
 
     pvfb->damage = DamageCreate(NULL, NULL, DamageReportNone, TRUE, pScreen, NULL);
     if (!pvfb->damage)
@@ -378,46 +412,14 @@ static Bool lorieCreateScreenResources(ScreenPtr pScreen) {
 
 static Bool
 lorieCloseScreen(ScreenPtr pScreen) {
-    pScreen->CloseScreen = pvfb->CloseScreen;
-
-    /*
-     * fb overwrites miCloseScreen, so do this here
-     */
-    if (pScreen->devPrivate)
-        (*pScreen->DestroyPixmap)(pScreen->devPrivate);
-    pScreen->devPrivate = NULL;
-    pScreenPtr = NULL;
-
+    unwrap(pvfb, pScreen, CloseScreen)
+    // No need to call fbDestroyPixmap since AllocatePixmap sets pixmap as PRIVATE_SCREEN so it is destroyed automatically.
     return pScreen->CloseScreen(pScreen);
-}
-
-static int
-lorieSetPixmapVisitWindow(WindowPtr window, void *data) {
-    ScreenPtr screen = window->drawable.pScreen;
-
-    if (screen->GetWindowPixmap(window) == data) {
-        screen->SetWindowPixmap(window, screen->GetScreenPixmap(screen));
-        return WT_WALKCHILDREN;
-    }
-
-    return WT_DONTWALKCHILDREN;
 }
 
 static Bool
 lorieRRScreenSetSize(ScreenPtr pScreen, CARD16 width, CARD16 height, unused CARD32 mmWidth, unused CARD32 mmHeight) {
-    PixmapPtr old_pixmap, new_pixmap;
     SetRootClip(pScreen, ROOT_CLIP_NONE);
-
-//    DamageUnregister(pvfb->damage);
-//    old_pixmap = pScreen->GetScreenPixmap(pScreen);
-//    new_pixmap = pScreen->CreatePixmap(pScreen, 0, 0, pScreen->rootDepth, CREATE_PIXMAP_USAGE_BACKING_PIXMAP);
-//    pScreen->SetScreenPixmap(new_pixmap);
-//
-//    if (old_pixmap) {
-//        TraverseTree(pScreen->root, lorieSetPixmapVisitWindow, old_pixmap);
-//        pScreen->DestroyPixmap(old_pixmap);
-//    }
-//    DamageRegister(&(*pScreen->GetScreenPixmap)(pScreen)->drawable, pvfb->damage);
 
     pScreen->width = width;
     pScreen->height = height;
@@ -517,6 +519,7 @@ lorieScreenInit(ScreenPtr pScreen, unused int argc, unused char **argv) {
     wrap(pvfb, pScreen, CreateScreenResources, lorieCreateScreenResources)
     wrap(pvfb, pScreen, CloseScreen, lorieCloseScreen)
     QueueWorkProc(resetRootCursor, NULL, NULL);
+    ShmRegisterFbFuncs(pScreen);
 
     return TRUE;
 }                               /* end lorieScreenInit */
