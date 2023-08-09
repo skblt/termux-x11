@@ -11,16 +11,12 @@ import android.graphics.PointF;
  * This class stores UI configuration that will be used when rendering the remote desktop.
  */
 public class RenderData {
-    /** Stores pan and zoom configuration and converts image coordinates to screen coordinates. */
-    public Matrix transform = new Matrix();
+    public PointF scale = new PointF();
 
     public int screenWidth;
     public int screenHeight;
     public int imageWidth;
     public int imageHeight;
-
-    /** Determines whether the local cursor should be drawn. */
-    public boolean drawCursor;
 
     /**
      * Specifies the position, in image coordinates, at which the cursor image will be drawn.
@@ -56,14 +52,5 @@ public class RenderData {
         }
 
         return cursorMoved;
-    }
-
-    /**
-     * Indicates whether all information required to render the canvas has been set.
-     *
-     * @return True if both screen and image dimensions have been set.
-     */
-    public boolean initialized() {
-        return imageWidth != 0 && imageHeight != 0 && screenWidth != 0 && screenHeight != 0;
     }
 }

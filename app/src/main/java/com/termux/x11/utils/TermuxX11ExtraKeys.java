@@ -15,12 +15,12 @@ import android.util.Log;
 import android.view.KeyCharacterMap;
 import android.view.KeyEvent;
 import android.view.View;
+import android.widget.Button;
+import android.widget.Toast;
 
 import androidx.annotation.NonNull;
 import androidx.viewpager.widget.ViewPager;
 
-import com.google.android.material.button.MaterialButton;
-import com.termux.shared.logger.Logger;
 import com.termux.shared.termux.extrakeys.*;
 import com.termux.x11.LoriePreferences;
 import com.termux.x11.MainActivity;
@@ -53,10 +53,10 @@ public class TermuxX11ExtraKeys implements ExtraKeysView.IExtraKeysView {
     static final String ACTION_START_PREFERENCES_ACTIVITY = "com.termux.x11.start_preferences_activity";
 
     @Override
-    public void onExtraKeyButtonClick(View view, ExtraKeyButton buttonInfo, MaterialButton button) {
-        Log.e("keys", "key " + buttonInfo.getDisplay());
-        if (buttonInfo.isMacro()) {
-            String[] keys = buttonInfo.getKey().split(" ");
+    public void onExtraKeyButtonClick(View view, ExtraKeyButton buttonInfo, Button button) {
+        Log.e("keys", "key " + buttonInfo.display);
+        if (buttonInfo.macro) {
+            String[] keys = buttonInfo.key.split(" ");
             boolean ctrlDown = false;
             boolean altDown = false;
             boolean shiftDown = false;
@@ -79,54 +79,54 @@ public class TermuxX11ExtraKeys implements ExtraKeysView.IExtraKeysView {
                 onLorieExtraKeyButtonClick(view, key, ctrlDown, altDown, shiftDown, fnDown);
             }
         } else {
-            onLorieExtraKeyButtonClick(view, buttonInfo.getKey(), false, false, false, false);
+            onLorieExtraKeyButtonClick(view, buttonInfo.key, false, false, false, false);
         }
     }
 
     protected void onTerminalExtraKeyButtonClick(@SuppressWarnings("unused") View view, String key, boolean ctrlDown, boolean altDown, boolean shiftDown, @SuppressWarnings("unused") boolean fnDown) {
         if (this.ctrlDown != ctrlDown) {
             this.ctrlDown = ctrlDown;
-            mActivity.sendKeyEvent(0, KeyEvent.KEYCODE_CTRL_LEFT, ctrlDown);
+            mActivity.getLorieView().sendKeyEvent(0, KeyEvent.KEYCODE_CTRL_LEFT, ctrlDown);
         }
 
         if (this.altDown != altDown) {
             this.altDown = altDown;
-            mActivity.sendKeyEvent(0, KeyEvent.KEYCODE_ALT_LEFT, altDown);
+            mActivity.getLorieView().sendKeyEvent(0, KeyEvent.KEYCODE_ALT_LEFT, altDown);
         }
 
         if (this.shiftDown != shiftDown) {
             this.shiftDown = shiftDown;
-            mActivity.sendKeyEvent(0, KeyEvent.KEYCODE_SHIFT_LEFT, shiftDown);
+            mActivity.getLorieView().sendKeyEvent(0, KeyEvent.KEYCODE_SHIFT_LEFT, shiftDown);
         }
 
         if (PRIMARY_KEY_CODES_FOR_STRINGS.containsKey(key)) {
             Integer keyCode = PRIMARY_KEY_CODES_FOR_STRINGS.get(key);
             if (keyCode == null) return;
 
-            mActivity.sendKeyEvent(0, keyCode, true);
-            mActivity.sendKeyEvent(0, keyCode, false);
+            mActivity.getLorieView().sendKeyEvent(0, keyCode, true);
+            mActivity.getLorieView().sendKeyEvent(0, keyCode, false);
         } else {
             // not a control char
-            mActivity.sendTextEvent(key);
+            mActivity.getLorieView().sendTextEvent(key);
         }
     }
 
     @Override
-    public boolean performExtraKeyButtonHapticFeedback(View view, ExtraKeyButton buttonInfo, MaterialButton button) {
+    public boolean performExtraKeyButtonHapticFeedback(View view, ExtraKeyButton buttonInfo, Button button) {
         MainActivity.handler.postDelayed(() -> {
             boolean pressed;
-            switch (buttonInfo.getKey()) {
+            switch (buttonInfo.key) {
                 case "CTRL":
                     pressed = Boolean.TRUE.equals(mExtraKeysView.readSpecialButton(SpecialButton.CTRL, false));
-                    mActivity.sendKeyEvent(0, KeyEvent.KEYCODE_CTRL_LEFT, pressed);
+                    mActivity.getLorieView().sendKeyEvent(0, KeyEvent.KEYCODE_CTRL_LEFT, pressed);
                     break;
                 case "ALT":
                     pressed = Boolean.TRUE.equals(mExtraKeysView.readSpecialButton(SpecialButton.ALT, false));
-                    mActivity.sendKeyEvent(0, KeyEvent.KEYCODE_ALT_LEFT, pressed);
+                    mActivity.getLorieView().sendKeyEvent(0, KeyEvent.KEYCODE_ALT_LEFT, pressed);
                     break;
                 case "SHIFT":
                     pressed = Boolean.TRUE.equals(mExtraKeysView.readSpecialButton(SpecialButton.SHIFT, false));
-                    mActivity.sendKeyEvent(0, KeyEvent.KEYCODE_SHIFT_LEFT, pressed);
+                    mActivity.getLorieView().sendKeyEvent(0, KeyEvent.KEYCODE_SHIFT_LEFT, pressed);
                     break;
             }
         }, 100);
@@ -186,14 +186,14 @@ public class TermuxX11ExtraKeys implements ExtraKeysView.IExtraKeysView {
             String extrakeys = preferences.getString("extra_keys_config", TermuxX11ExtraKeys.DEFAULT_IVALUE_EXTRA_KEYS);
             mExtraKeysInfo = new ExtraKeysInfo(extrakeys, "extra-keys-style", ExtraKeysConstants.CONTROL_CHARS_ALIASES);
         } catch (JSONException e) {
-            Logger.showToast(mActivity, "Could not load and set the \"extra-keys\" property from the properties file: " + e, true);
-            Logger.logStackTraceWithMessage(LOG_TAG, "Could not load and set the \"extra-keys\" property from the properties file: ", e);
+            Toast.makeText(mActivity, "Could not load and set the \"extra-keys\" property from the properties file: " + e, Toast.LENGTH_LONG).show();
+            Log.e(LOG_TAG, "Could not load and set the \"extra-keys\" property from the properties file: ", e);
 
             try {
                 mExtraKeysInfo = new ExtraKeysInfo(TermuxX11ExtraKeys.DEFAULT_IVALUE_EXTRA_KEYS, "default", ExtraKeysConstants.CONTROL_CHARS_ALIASES);
             } catch (JSONException e2) {
-                Logger.showToast(mActivity, "Can't create default extra keys",true);
-                Logger.logStackTraceWithMessage(LOG_TAG, "Could create default extra keys: ", e);
+                Toast.makeText(mActivity, "Can't create default extra keys", Toast.LENGTH_LONG).show();
+                Log.e(LOG_TAG, "Could create default extra keys: ", e);
                 mExtraKeysInfo = null;
             }
         }

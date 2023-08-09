@@ -2,12 +2,15 @@ package com.termux.x11;
 
 import android.annotation.SuppressLint;
 import android.app.Activity;
+import android.content.ClipData;
+import android.content.ClipboardManager;
 import android.content.Context;
 import android.content.ContextWrapper;
 import android.content.SharedPreferences;
-import android.graphics.PixelFormat;
+import android.graphics.Color;
 import android.graphics.Point;
 import android.graphics.Rect;
+import android.graphics.drawable.ColorDrawable;
 import android.preference.PreferenceManager;
 import android.util.AttributeSet;
 import android.util.Log;
@@ -17,11 +20,13 @@ import android.view.SurfaceView;
 
 import androidx.annotation.NonNull;
 
+import com.termux.x11.input.InputStub;
+
 import java.util.regex.PatternSyntaxException;
 
 @SuppressLint("WrongConstant")
 @SuppressWarnings("deprecation")
-public class LorieView extends SurfaceView {
+public class LorieView extends SurfaceView implements InputStub {
     interface Callback {
         void changed(Surface sfc, int surfaceWidth, int surfaceHeight, int screenWidth, int screenHeight);
     }
@@ -83,6 +88,15 @@ public class LorieView extends SurfaceView {
         setFocusable(true);
         setFocusableInTouchMode(true);
         requestFocus();
+
+        setBackground(new ColorDrawable(Color.TRANSPARENT) {
+            public boolean isStateful() {
+                return true;
+            }
+            public boolean hasFocusStateSpecified() {
+                return true;
+            }
+        });
 
         Rect r = getHolder().getSurfaceFrame();
         getActivity().runOnUiThread(() -> mSurfaceCallback.surfaceChanged(getHolder(), PixelFormat.BGRA_8888, r.width(), r.height()));
@@ -169,5 +183,31 @@ public class LorieView extends SurfaceView {
 
         getHolder().setFixedSize(p.x, p.y);
         setMeasuredDimension(width, height);
+    }
+
+    @Override
+    public void sendMouseWheelEvent(float deltaX, float deltaY) {
+        sendMouseEvent(deltaX, deltaY, BUTTON_SCROLL, false, true);
+    }
+
+    // It is used in native code
+    void setClipboardText(String text) {
+        ClipboardManager clipboard = (ClipboardManager) getContext().getSystemService(Context.CLIPBOARD_SERVICE);
+        clipboard.setPrimaryClip(ClipData.newPlainText("X11 clipboard", text));
+    }
+
+    static native void connect(int fd);
+    native void handleXEvents();
+    static native void startLogcat(int fd);
+    static native void setClipboardSyncEnabled(boolean enabled);
+    static native void sendWindowChange(int width, int height, int framerate);
+    public native void sendMouseEvent(float x, float y, int whichButton, boolean buttonDown, boolean relative);
+    public native void sendTouchEvent(int action, int id, int x, int y);
+    public native boolean sendKeyEvent(int scanCode, int keyCode, boolean keyDown);
+    public native void sendTextEvent(String text);
+    public native void sendUnicodeEvent(int code);
+
+    static {
+        System.loadLibrary("Xlorie");
     }
 }

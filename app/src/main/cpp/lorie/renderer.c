@@ -205,7 +205,7 @@ void renderer_set_buffer(AHardwareBuffer* buf) {
     AHardwareBuffer_Desc desc = {0};
 
     if (eglGetCurrentContext() == EGL_NO_CONTEXT) {
-        loge("There is no current context, `renderer_set_buffer` is call is cancelled");
+        loge("There is no current context, `renderer_set_buffer` call is cancelled");
         return;
     }
 
@@ -241,12 +241,16 @@ void renderer_set_buffer(AHardwareBuffer* buf) {
             eglCheckError(__LINE__);
             loge("Binding AHardwareBuffer to an EGLImage failed.");
 
+            display.width = 1;
+            display.height = 1;
             uint32_t data = {0};
             glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 1, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, &data);
             checkGlError();
         }
         checkGlError();
     } else {
+        display.width = 1;
+        display.height = 1;
         uint32_t data = {0};
         loge("There is no AHardwareBuffer, nothing to be bound.");
         glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 1, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, &data); checkGlError();
@@ -257,7 +261,7 @@ void renderer_set_buffer(AHardwareBuffer* buf) {
     log("renderer_set_buffer %p %d %d", buffer, desc.width, desc.height);
 }
 
-void renderer_set_window(EGLNativeWindowType window) {
+void renderer_set_window(EGLNativeWindowType window, AHardwareBuffer* buffer) {
     log("renderer_set_window %p %d %d", window, window ? ANativeWindow_getWidth(window) : 0, window ? ANativeWindow_getHeight(window) : 0);
     if (window && win == window)
         return;
@@ -319,9 +323,32 @@ void renderer_set_window(EGLNativeWindowType window) {
 
     log("Xlorie: new surface applied: %p\n", sfc);
 
-    glClearColor(1.f, 0.f, 0.f, 0.0f); checkGlError();
-    glClear(GL_COLOR_BUFFER_BIT); checkGlError();
-    renderer_redraw();
+    if (!buffer) {
+        glClearColor(0.f, 0.f, 0.f, 0.0f); checkGlError();
+        glClear(GL_COLOR_BUFFER_BIT); checkGlError();
+    } else renderer_set_buffer(buffer);
+}
+
+void renderer_update_root(int w, int h, void* data) {
+    if (eglGetCurrentContext() == EGL_NO_CONTEXT || !w || !h)
+        return;
+
+    if (display.width != (float) w || display.height != (float) h) {
+        display.width = (float) w;
+        display.height = (float) h;
+
+        glBindTexture(GL_TEXTURE_2D, display.id); checkGlError();
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST); checkGlError();
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST); checkGlError();
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE); checkGlError();
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE); checkGlError();
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_BGRA_EXT, w, h, 0, GL_BGRA_EXT, GL_UNSIGNED_BYTE, data); checkGlError();
+    } else {
+        glBindTexture(GL_TEXTURE_2D, display.id); checkGlError();
+
+        glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, w, h, GL_BGRA_EXT, GL_UNSIGNED_BYTE, data);
+        checkGlError();
+    }
 }
 
 void renderer_update_cursor(int w, int h, int xhot, int yhot, void* data) {
@@ -372,7 +399,7 @@ int renderer_redraw(void) {
             log("We've got %s so window is to be destroyed. "
                 "Native window disconnected/abandoned, probably activity is destroyed or in background",
                 eglErrorLabel(err));
-            renderer_set_window(NULL);
+            renderer_set_window(NULL, NULL);
             return FALSE;
         }
     }

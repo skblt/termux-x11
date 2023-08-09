@@ -3,48 +3,71 @@
 #pragma ide diagnostic ignored "bugprone-reserved-identifier"
 #pragma ide diagnostic ignored "OCUnusedMacroInspection"
 #define __USE_GNU
-#include <pthread.h>
+#ifdef HAVE_DIX_CONFIG_H
+#include <dix-config.h>
+#endif
 #include <jni.h>
 #include <android/log.h>
 #include <android/native_window_jni.h>
 #include <sys/stat.h>
-#include <sys/mman.h>
 #include <sys/socket.h>
 #include <sys/prctl.h>
-#include <xcb.h>
-#include <linux/un.h>
-#include <libgen.h>
-#include <xcb/xfixes.h>
-#include <xcb_errors.h>
-#include <stdlib.h>
-#include <string.h>
 #include <libgen.h>
 #include <globals.h>
 #include <xkbsrv.h>
 #include <errno.h>
-#include <dlfcn.h>
 #include <wchar.h>
-#include <sched.h>
+#include <inpututils.h>
+#include <randrstr.h>
 #include "renderer.h"
 #include "lorie.h"
-#include "android-to-linux-keycodes.h"
-#include "whereami.h"
-#include "tx11.h"
 
 #define log(prio, ...) __android_log_print(ANDROID_LOG_ ## prio, "LorieNative", __VA_ARGS__)
 
 static int argc = 0;
 static char** argv = NULL;
+static int conn_fd = -1;
 extern char *__progname; // NOLINT(bugprone-reserved-identifier)
+extern DeviceIntPtr lorieMouse, lorieMouseRelative, lorieTouch, lorieKeyboard;
+extern ScreenPtr pScreenPtr;
+extern int ucs2keysym(long ucs);
+void lorieKeysymKeyboardEvent(KeySym keysym, int down);
 
-extern char *xtrans_unix_path_x11;
-extern char *xtrans_unix_dir_x11;
-extern char *xtrans_unix_path_xim;
-extern char *xtrans_unix_dir_xim;
-extern char *xtrans_unix_path_fs;
-extern char *xtrans_unix_dir_fs;
-extern char *xtrans_unix_path_ice;
-extern char *xtrans_unix_dir_ice;
+char *xtrans_unix_path_x11 = NULL;
+char *xtrans_unix_dir_x11 = NULL;
+
+typedef enum {
+    EVENT_SCREEN_SIZE, EVENT_TOUCH, EVENT_MOUSE, EVENT_KEY, EVENT_UNICODE, EVENT_CLIPBOARD_SYNC
+} eventType;
+typedef union {
+    uint8_t type;
+    struct {
+        uint8_t t;
+        uint16_t width, height, framerate;
+    } screenSize;
+    struct {
+        uint8_t t;
+        uint16_t type, id, x, y;
+    } touch;
+    struct {
+        uint8_t t;
+        float x, y;
+        uint8_t detail, down, relative;
+    } mouse;
+    struct {
+        uint8_t t;
+        uint16_t key;
+        uint8_t state;
+    } key;
+    struct {
+        uint8_t t;
+        uint32_t code;
+    } unicode;
+    struct {
+        uint8_t t;
+        uint8_t enable;
+    } clipboardSync;
+} lorieEvent;
 
 static void* startServer(unused void* cookie) {
     char* envp[] = { NULL };
@@ -53,7 +76,6 @@ static void* startServer(unused void* cookie) {
 
 JNIEXPORT jboolean JNICALL
 Java_com_termux_x11_CmdEntryPoint_start(JNIEnv *env, unused jclass cls, jobjectArray args) {
-    char lib[128] = {0};
     pthread_t t;
     // execv's argv array is a bit incompatible with Java's String[], so we do some converting here...
     argc = (*env)->GetArrayLength(env, args) + 1; // Leading executable path
@@ -88,7 +110,7 @@ Java_com_termux_x11_CmdEntryPoint_start(JNIEnv *env, unused jclass cls, jobjectA
     }
 
     // adb sets TMPDIR to /data/local/tmp which is pretty useless.
-    if (getenv("TMPDIR") && !strcmp("/data/local/tmp", getenv("TMPDIR")))
+    if (!strcmp("/data/local/tmp", getenv("TMPDIR") ?: ""))
         unsetenv("TMPDIR");
 
     if (!getenv("TMPDIR")) {
@@ -106,16 +128,13 @@ Java_com_termux_x11_CmdEntryPoint_start(JNIEnv *env, unused jclass cls, jobjectA
     }
 
     {
-        char* path = getenv("TMPDIR");
+        char* tmp = getenv("TMPDIR");
+        char cwd[1024] = {0};
 
-        asprintf(&xtrans_unix_path_x11, "%s/.X11-unix/X", path);
-        asprintf(&xtrans_unix_dir_x11, "%s/.X11-unix/", path);
-        asprintf(&xtrans_unix_path_xim, "%s/.XIM-unix/XIM", path);
-        asprintf(&xtrans_unix_dir_xim, "%s/.XIM-unix", path);
-        asprintf(&xtrans_unix_path_fs, "%s/.font-unix/fs", path);
-        asprintf(&xtrans_unix_dir_fs, "%s/.font-unix", path);
-        asprintf(&xtrans_unix_path_ice, "%s/.ICE-unix/", path);
-        asprintf(&xtrans_unix_dir_ice, "%s/.ICE-unix", path);
+        if (!getcwd(cwd, sizeof(cwd)) || access(cwd, F_OK) != 0)
+            chdir(tmp);
+        asprintf(&xtrans_unix_path_x11, "%s/.X11-unix/X", tmp);
+        asprintf(&xtrans_unix_dir_x11, "%s/.X11-unix/", tmp);
     }
 
     log(VERBOSE, "Using TMPDIR=\"%s\"", getenv("TMPDIR"));
@@ -163,8 +182,6 @@ Java_com_termux_x11_CmdEntryPoint_start(JNIEnv *env, unused jclass cls, jobjectA
         return JNI_FALSE;
     }
 
-    wai_getModulePath(lib, sizeof(lib), NULL);
-
     XkbBaseDirectory = getenv("XKB_CONFIG_ROOT");
     if (access(XkbBaseDirectory, F_OK) != 0) {
         log(ERROR, "%s is unaccessible: %s\n", XkbBaseDirectory, strerror(errno));
@@ -178,7 +195,19 @@ Java_com_termux_x11_CmdEntryPoint_start(JNIEnv *env, unused jclass cls, jobjectA
 
 JNIEXPORT void JNICALL
 Java_com_termux_x11_CmdEntryPoint_windowChanged(JNIEnv *env, unused jobject cls, jobject surface) {
+    static jobject cached = NULL;
     ANativeWindow* win = surface ? ANativeWindow_fromSurface(env, surface) : NULL;
+
+    if (cached) {
+        jmethodID release = (*env)->GetMethodID(env, (*env)->GetObjectClass(env, cached), "release", "()V");
+        if (release)
+            (*env)->CallVoidMethod(env, cached, release);
+        (*env)->DeleteGlobalRef(env, cached);
+    }
+
+    if (surface)
+        cached = (*env)->NewGlobalRef(env, surface);
+
     if (win)
         ANativeWindow_acquire(win);
     log(DEBUG, "window change: %p", win);
@@ -186,8 +215,115 @@ Java_com_termux_x11_CmdEntryPoint_windowChanged(JNIEnv *env, unused jobject cls,
     QueueWorkProc(lorieChangeWindow, NULL, win);
 }
 
+void handleLorieEvents(int fd, maybe_unused int ready, maybe_unused void *data) {
+    ValuatorMask mask;
+    lorieEvent e = {0};
+    valuator_mask_zero(&mask);
+
+    if (ready & X_NOTIFY_ERROR) {
+        RemoveNotifyFd(fd);
+        close(fd);
+        conn_fd = -1;
+        lorieEnableClipboardSync(FALSE);
+        return;
+    }
+
+    if (read(fd, &e, sizeof(e)) == sizeof(e)) {
+        switch(e.type) {
+            case EVENT_SCREEN_SIZE:
+                __android_log_print(ANDROID_LOG_ERROR, "tx11-request", "window changed: %d %d", e.screenSize.width, e.screenSize.height);
+                lorieConfigureNotify(e.screenSize.width, e.screenSize.height, e.screenSize.framerate);
+                break;
+            case EVENT_TOUCH: {
+                double x, y;
+                DDXTouchPointInfoPtr touch = TouchFindByDDXID(lorieTouch, e.touch.id, FALSE);
+
+                x = (float) e.touch.x * 0xFFFF / (float) pScreenPtr->GetScreenPixmap(pScreenPtr)->drawable.width;
+                y = (float) e.touch.y * 0xFFFF / (float) pScreenPtr->GetScreenPixmap(pScreenPtr)->drawable.height;
+
+                // Avoid duplicating events
+                if (touch && touch->active) {
+                    double oldx, oldy;
+                    if (e.touch.type == XI_TouchUpdate &&
+                        valuator_mask_fetch_double(touch->valuators, 0, &oldx) &&
+                        valuator_mask_fetch_double(touch->valuators, 1, &oldy) &&
+                        oldx == x && oldy == y)
+                        break;
+                }
+
+                // Sometimes activity part does not send XI_TouchBegin and sends only XI_TouchUpdate.
+                if (e.touch.type == XI_TouchUpdate && (!touch || !touch->active))
+                    e.touch.type = XI_TouchBegin;
+
+                if (e.touch.type == XI_TouchEnd && (!touch || !touch->active))
+                    break;
+
+                __android_log_print(ANDROID_LOG_ERROR, "tx11-request", "touch event: %d %d %d %d", e.touch.type, e.touch.id, e.touch.x, e.touch.y);
+                valuator_mask_set_double(&mask, 0, x);
+                valuator_mask_set_double(&mask, 1, y);
+                QueueTouchEvents(lorieTouch, e.touch.type, e.touch.id, 0, &mask);
+                break;
+            }
+            case EVENT_MOUSE: {
+                int flags;
+                switch(e.mouse.detail) {
+                    case 0: // BUTTON_UNDEFINED
+                        if (e.mouse.relative) {
+                            valuator_mask_set_double(&mask, 0, (double) e.mouse.x);
+                            valuator_mask_set_double(&mask, 1, (double) e.mouse.y);
+                            QueuePointerEvents(lorieMouseRelative, MotionNotify, 0, POINTER_RELATIVE | POINTER_ACCELERATE, &mask);
+                        } else {
+                            flags = POINTER_ABSOLUTE | POINTER_SCREEN | POINTER_NORAW;
+                            valuator_mask_set_double(&mask, 0, (double) e.mouse.x);
+                            valuator_mask_set_double(&mask, 1, (double) e.mouse.y);
+                            QueuePointerEvents(lorieMouse, MotionNotify, 0, flags, &mask);
+                        }
+                        break;
+                    case 1: // BUTTON_LEFT
+                    case 2: // BUTTON_MIDDLE
+                    case 3: // BUTTON_RIGHT
+                        QueuePointerEvents(e.mouse.relative ? lorieMouseRelative : lorieMouse, e.mouse.down ? ButtonPress : ButtonRelease, e.mouse.detail, 0, &mask);
+                        break;
+                    case 4: // BUTTON_SCROLL
+                        if (e.mouse.x) {
+                            valuator_mask_zero(&mask);
+                            valuator_mask_set_double(&mask, 2, (double) e.mouse.x / 120);
+                            QueuePointerEvents(lorieMouseRelative, MotionNotify, 0, POINTER_RELATIVE, &mask);
+                        }
+                        if (e.mouse.y) {
+                            valuator_mask_zero(&mask);
+                            valuator_mask_set_double(&mask, 3, (double) e.mouse.y / 120);
+                            QueuePointerEvents(lorieMouseRelative, MotionNotify, 0, POINTER_RELATIVE, &mask);
+                        }
+                        break;
+                }
+                break;
+            }
+            case EVENT_KEY:
+                QueueKeyboardEvents(lorieKeyboard, e.key.state ? KeyPress : KeyRelease, e.key.key);
+                break;
+            case EVENT_UNICODE: {
+                int ks = ucs2keysym((long) e.unicode.code);
+                __android_log_print(ANDROID_LOG_DEBUG, "LorieNative", "Trying to input keysym %d\n", ks);
+                lorieKeysymKeyboardEvent(ks, TRUE);
+                lorieKeysymKeyboardEvent(ks, FALSE);
+                break;
+            }
+            case EVENT_CLIPBOARD_SYNC:
+                lorieEnableClipboardSync(e.clipboardSync.enable);
+                break;
+        }
+    }
+}
+
+void lorieSendClipboardData(const char* data) {
+    if (data && conn_fd != -1)
+        write(conn_fd, data, strlen(data));
+}
+
 static Bool addFd(unused ClientPtr pClient, void *closure) {
-    AddClientOnOpenFD((int) (int64_t) closure);
+    SetNotifyFd((int) (int64_t) closure, handleLorieEvents, X_NOTIFY_READ, NULL);
+    conn_fd = (int) (int64_t) closure;
     return TRUE;
 }
 
@@ -197,6 +333,7 @@ Java_com_termux_x11_CmdEntryPoint_getXConnection(JNIEnv *env, unused jobject cls
     jclass ParcelFileDescriptorClass = (*env)->FindClass(env, "android/os/ParcelFileDescriptor");
     jmethodID adoptFd = (*env)->GetStaticMethodID(env, ParcelFileDescriptorClass, "adoptFd", "(I)Landroid/os/ParcelFileDescriptor;");
     socketpair(AF_UNIX, SOCK_STREAM, 0, client);
+    fcntl(client[0], F_SETFL, fcntl(client[0], F_GETFL, 0) | O_NONBLOCK);
     QueueWorkProc(addFd, NULL, (void*) (int64_t) client[1]);
 
     return (*env)->CallStaticObjectMethod(env, ParcelFileDescriptorClass, adoptFd, client[0]);
@@ -227,193 +364,81 @@ Java_com_termux_x11_CmdEntryPoint_getLogcatOutput(JNIEnv *env, unused jobject cl
     return NULL;
 }
 
-static xcb_connection_t* conn = NULL;
-static int xfixes_first_event = 0;
-static xcb_errors_context_t *err_ctx = NULL;
-static xcb_window_t win = 0;
-static xcb_atom_t prop_sel = 0;
-static xcb_atom_t atom_clipboard = 0;
-static bool clipboard_sync_enabled = false;
+static inline void checkConnection(JNIEnv* env) {
+    int retval, b = 0;
 
-static void parse_error(xcb_generic_error_t* err) {
-    const char* ext = NULL;
-    const char* err_name = NULL;
-
-    if (!err)
+    if (conn_fd == -1)
         return;
 
-    err_name =  xcb_errors_get_name_for_error(err_ctx, err->error_code, &ext);
-    log(ERROR, "\n"
-        "XCB Error of failed request:               %s::%s\n"
-        "  Major opcode of failed request:          %d (%s)\n"
-        "  Minor opcode of failed request:          %d (%s)\n"
-        "  Serial number of failed request:         %d\n"
-        "  Current serial number in output stream:  %d",
-        (ext?:""), err_name, err->major_code,
-        xcb_errors_get_name_for_major_code(err_ctx, err->major_code),
-        err->minor_code, xcb_errors_get_name_for_minor_code(err_ctx, err->major_code, err->minor_code) ?: "Core",
-        err->sequence, err->full_sequence);
-    free(err);
+    if ((retval = recv(conn_fd, &b, 1, MSG_PEEK)) <= 0 && errno != EAGAIN) {
+        log(DEBUG, "recv %d %s", retval, strerror(errno));
+        jclass cls = (*env)->FindClass(env, "com/termux/x11/CmdEntryPoint");
+        jmethodID method = !cls ? NULL : (*env)->GetStaticMethodID(env, cls, "requestConnection", "()V");
+        if (method)
+            (*env)->CallStaticVoidMethod(env, cls, method);
+
+        close(conn_fd);
+        conn_fd = -1;
+    }
 }
 
 JNIEXPORT void JNICALL
-Java_com_termux_x11_MainActivity_connect(unused JNIEnv* env, unused jobject cls, jint fd) {
-    xcb_connection_t* new_conn = xcb_connect_to_fd(fd, NULL);
-    int conn_err = xcb_connection_has_error(new_conn);
-    xcb_generic_error_t* err = NULL;
-    if (conn_err) {
-        const char *s;
-        switch (conn_err) {
-#define c(name) case name: s = #name; break
-            c(XCB_CONN_ERROR);
-            c(XCB_CONN_CLOSED_EXT_NOTSUPPORTED);
-            c(XCB_CONN_CLOSED_MEM_INSUFFICIENT);
-            c(XCB_CONN_CLOSED_REQ_LEN_EXCEED);
-            c(XCB_CONN_CLOSED_PARSE_ERR);
-            c(XCB_CONN_CLOSED_INVALID_SCREEN);
-            c(XCB_CONN_CLOSED_FDPASSING_FAILED);
-            default:
-                s = "UNKNOWN";
-#undef c
-        }
-
-        log(ERROR, "XCB connection has error: %s", s);
-    }
-
-    if (err_ctx)
-        xcb_errors_context_free(err_ctx);
-    if (conn)
-        xcb_disconnect(conn);
-    conn = new_conn;
-    xcb_errors_context_new(conn, &err_ctx);
-
+Java_com_termux_x11_LorieView_connect(unused JNIEnv* env, unused jobject cls, jint fd) {
+    conn_fd = fd;
+    fcntl(fd, F_SETFL, fcntl(fd, F_GETFL, 0) | O_NONBLOCK);
+    checkConnection(env);
     log(DEBUG, "XCB connection is successfull");
-
-    {
-        xcb_query_extension_cookie_t cookie = xcb_query_extension(conn, 6, "XFIXES");
-        xcb_query_extension_reply_t* reply = xcb_query_extension_reply(conn, cookie, &err);
-        parse_error(err);
-        if (reply)
-            xfixes_first_event = reply->first_event;
-        free(reply);
-    }
-    {
-        xcb_xfixes_query_version_cookie_t cookie = xcb_xfixes_query_version(conn, 4, 0);
-        xcb_xfixes_query_version_reply_t* reply = xcb_xfixes_query_version_reply(conn, cookie, &err);
-        parse_error(err);
-        free(reply);
-    }
-    {
-        xcb_intern_atom_cookie_t cookie = xcb_intern_atom(conn, false, 9, "CLIPBOARD");
-        xcb_intern_atom_reply_t* reply = xcb_intern_atom_reply(conn, cookie, &err);
-        parse_error(err);
-        if (reply)
-            atom_clipboard = reply->atom;
-        free(reply);
-    }
-    {
-        xcb_intern_atom_cookie_t cookie = xcb_intern_atom(conn, false, 15, "TERMUX_X11_CLIP");
-        xcb_intern_atom_reply_t* reply = xcb_intern_atom_reply(conn, cookie, &err);
-        parse_error(err);
-        if (reply)
-            prop_sel = reply->atom;
-        free(reply);
-    }
-    {
-        xcb_screen_t *s = xcb_setup_roots_iterator(xcb_get_setup(conn)).data;
-        xcb_void_cookie_t cookie = xcb_xfixes_select_selection_input_checked(conn, s->root, atom_clipboard,
-                                                                XCB_XFIXES_SELECTION_EVENT_MASK_SET_SELECTION_OWNER);
-        parse_error(xcb_request_check(conn, cookie));
-    }
-
-    {
-        xcb_void_cookie_t cookie;
-        xcb_screen_t *s = xcb_setup_roots_iterator(xcb_get_setup(conn)).data;
-        win = xcb_generate_id(conn);
-        cookie = xcb_create_window_checked(conn, 0, win, s->root, 0, 0,
-                                           10, 10, 0, XCB_WINDOW_CLASS_INPUT_ONLY,
-                                           XCB_COPY_FROM_PARENT, XCB_CW_OVERRIDE_REDIRECT,
-                                           (const uint32_t[]) {true});
-        parse_error(xcb_request_check(conn, cookie));
-    }
-
-    xcb_flush(conn);
 }
 
+static char clipboard[1024*1024] = {0};
+
 JNIEXPORT void JNICALL
-Java_com_termux_x11_MainActivity_handleXEvents(JNIEnv *env, jobject thiz) {
-    xcb_generic_event_t *ev;
-#if 0
-    static jfieldID fid = nullptr;
-    if (!fid) {
-        jclass fdClass = env->FindClass("java/io/FileDescriptor");
-        fid = fdClass ? env->GetFieldID(fdClass, "descriptor", "I") : nullptr;
-        if (fid == nullptr) {
-            log("Failed to find java/io/FileDescriptor class");
-            return 0;
-        }
-    }
-
-    int fd = env->GetIntField(jfd, fid);
-
-    // Other file descriptor means there is new connection and old one is not needed.
-    // Looper will automatically close other file descriptor, so there is no need to take care of this.
-    if (conn && xcb_get_file_descriptor(conn) != fd)
-        return 0;
-
-    if ((events & 4) == 4) // Catching EVENT_ERROR
-        return 0;
-#endif
-
-    if (!conn)
-        return;
-
-    while ((ev = xcb_poll_for_event(conn))) {
-        if (!ev->response_type)
-            parse_error((xcb_generic_error_t *) ev);
-        else if (ev->response_type == xfixes_first_event + XCB_XFIXES_SELECTION_NOTIFY) { // Clipboard selection notify
-            log(DEBUG, "Clipboard content changed!");
-            if (clipboard_sync_enabled) {
-                xcb_convert_selection(conn, win, atom_clipboard,XCB_ATOM_STRING, prop_sel, XCB_CURRENT_TIME);
-                xcb_flush(conn);
-            }
-
-        } else if ((ev->response_type & ~0x80) == XCB_SELECTION_NOTIFY) { // Clipboard selection response
-            xcb_generic_error_t* err = NULL;
-            uint32_t data_size = 0;
+Java_com_termux_x11_LorieView_handleXEvents(JNIEnv *env, maybe_unused jobject thiz) {
+    checkConnection(env);
+    if (conn_fd != -1) {
+        char none;
+        memset(clipboard, 0, sizeof(clipboard));
+        if (read(conn_fd, clipboard, sizeof(clipboard)) > 0) {
+            clipboard[sizeof(clipboard) - 1] = 0;
+            log(DEBUG, "Clipboard content (%zu symbols) is %s", strlen(clipboard), clipboard);
             jmethodID id = (*env)->GetMethodID(env, (*env)->GetObjectClass(env, thiz), "setClipboardText","(Ljava/lang/String;)V");
-            log(DEBUG, "We've got selection (clipboard) contents");
-            {
-                xcb_get_property_cookie_t cookie = xcb_get_property(conn, false, win, prop_sel, XCB_ATOM_ANY, 0, 0);
-                xcb_get_property_reply_t* reply = xcb_get_property_reply(conn, cookie, &err);
-                parse_error(err);
-                if (reply)
-                    data_size = reply->bytes_after;
-                free(reply);
-            }
-            log(DEBUG, "Clipboard size is %d", data_size);
-            if (data_size) {
-                xcb_get_property_cookie_t cookie = xcb_get_property(conn, false, win, prop_sel, XCB_ATOM_ANY, 0, data_size);
-                xcb_get_property_reply_t* reply = xcb_get_property_reply(conn, cookie, &err);
-                parse_error(err);
-                if (reply) {
-                    /* create NULL-terminated string even if for some reason it was not. */
-                    char *string = alloca(data_size + 1);
-                    memset(string, 0, data_size + 1);
-                    memcpy(string, xcb_get_property_value(reply), data_size);
-                    log(DEBUG, "Clipboard content is %s", string);
-                    (*env)->CallVoidMethod(env, thiz, id, (*env)->NewStringUTF(env, string));
-                }
-                free(reply);
+
+            jclass cls_Charset = (*env)->FindClass(env, "java/nio/charset/Charset");
+            jclass cls_CharBuffer = (*env)->FindClass(env, "java/nio/CharBuffer");
+            jmethodID mid_Charset_forName = cls_Charset ? (*env)->GetStaticMethodID(env, cls_Charset, "forName", "(Ljava/lang/String;)Ljava/nio/charset/Charset;") : NULL;
+            jmethodID mid_Charset_decode = cls_Charset ? (*env)->GetMethodID(env, cls_Charset, "decode", "(Ljava/nio/ByteBuffer;)Ljava/nio/CharBuffer;") : NULL;
+            jmethodID mid_CharBuffer_toString = cls_CharBuffer ? (*env)->GetMethodID(env, cls_CharBuffer, "toString", "()Ljava/lang/String;") : NULL;
+
+            if (!id)
+                log(ERROR, "setClipboardText method not found");
+            if (!cls_Charset)
+                log(ERROR, "java.nio.charset.Charset class not found");
+            if (!cls_CharBuffer)
+                log(ERROR, "java.nio.CharBuffer class not found");
+            if (!mid_Charset_forName)
+                log(ERROR, "java.nio.charset.Charset.forName method not found");
+            if (!mid_Charset_decode)
+                log(ERROR, "java.nio.charset.Charset.decode method not found");
+            if (!mid_CharBuffer_toString)
+                log(ERROR, "java.nio.CharBuffer.toString method not found");
+
+            if (id && cls_Charset && cls_CharBuffer && mid_Charset_forName && mid_Charset_decode && mid_CharBuffer_toString) {
+                jobject bb = (*env)->NewDirectByteBuffer(env, clipboard, strlen(clipboard));
+                jobject charset = (*env)->CallStaticObjectMethod(env, cls_Charset, mid_Charset_forName, (*env)->NewStringUTF(env, "UTF-8"));
+                jobject cb = (*env)->CallObjectMethod(env, charset, mid_Charset_decode, bb);
+                (*env)->DeleteLocalRef(env, bb);
+
+                jstring str = (*env)->CallObjectMethod(env, cb, mid_CharBuffer_toString);
+                (*env)->CallVoidMethod(env, thiz, id, str);
             }
         }
+
+        while(read(conn_fd, &none, sizeof(none)) > 0);
     }
 }
 
 JNIEXPORT void JNICALL
-Java_com_termux_x11_MainActivity_startLogcat(JNIEnv *env, unused jobject cls, jint fd) {
-    kill(-1, SIGTERM); // Termux:X11 starts only logcat, so any other process should not be killed.
-
+Java_com_termux_x11_LorieView_startLogcat(JNIEnv *env, unused jobject cls, jint fd) {
     log(DEBUG, "Starting logcat with output to given fd");
     system("/system/bin/logcat -c");
 
@@ -424,6 +449,7 @@ Java_com_termux_x11_MainActivity_startLogcat(JNIEnv *env, unused jobject cls, ji
         case 0:
             dup2(fd, 1);
             dup2(fd, 2);
+            prctl(PR_SET_PDEATHSIG, SIGTERM);
             execl("/system/bin/logcat", "logcat", NULL);
             log(ERROR, "exec logcat: %s", strerror(errno));
             (*env)->FatalError(env, "Exiting");
@@ -431,50 +457,57 @@ Java_com_termux_x11_MainActivity_startLogcat(JNIEnv *env, unused jobject cls, ji
 }
 
 JNIEXPORT void JNICALL
-Java_com_termux_x11_MainActivity_setClipboardSyncEnabled(unused JNIEnv* env, unused jobject cls, jboolean enabled) {
-    clipboard_sync_enabled = enabled;
-}
-
-JNIEXPORT void JNICALL
-Java_com_termux_x11_MainActivity_sendWindowChange(unused JNIEnv* env, unused jobject cls, jint width, jint height, jint framerate) {
-    if (conn) {
-        xcb_tx11_screen_size_change(conn, width, height, framerate);
-        xcb_flush(conn);
+Java_com_termux_x11_LorieView_setClipboardSyncEnabled(unused JNIEnv* env, unused jobject cls, jboolean enable) {
+    if (conn_fd != -1) {
+        lorieEvent e = { .clipboardSync = { .t = EVENT_CLIPBOARD_SYNC, .enable = enable } };
+        write(conn_fd, &e, sizeof(e));
+        checkConnection(env);
     }
 }
 
 JNIEXPORT void JNICALL
-Java_com_termux_x11_MainActivity_sendMouseEvent(unused JNIEnv* env, unused jobject cls, jfloat x, jfloat y, jint which_button, jboolean button_down, jboolean relative) {
-    if (conn) {
-        xcb_tx11_mouse_event(conn, x, y, which_button, button_down, relative); // NOLINT(cppcoreguidelines-narrowing-conversions)
-        xcb_flush(conn);
+Java_com_termux_x11_LorieView_sendWindowChange(unused JNIEnv* env, unused jobject cls, jint width, jint height, jint framerate) {
+    if (conn_fd != -1) {
+        lorieEvent e = { .screenSize = { .t = EVENT_SCREEN_SIZE, .width = width, .height = height, .framerate = framerate } };
+        write(conn_fd, &e, sizeof(e));
+        checkConnection(env);
     }
 }
 
 JNIEXPORT void JNICALL
-Java_com_termux_x11_MainActivity_sendTouchEvent(unused JNIEnv* env, unused jobject cls, jint action, jint id, jint x, jint y) {
-    if (conn) {
-        if (action >= 0) {
-            xcb_tx11_touch_event(conn, action, id, x, y); // NOLINT(cppcoreguidelines-narrowing-conversions)
-        } else xcb_flush(conn);
+Java_com_termux_x11_LorieView_sendMouseEvent(unused JNIEnv* env, unused jobject cls, jfloat x, jfloat y, jint which_button, jboolean button_down, jboolean relative) {
+    if (conn_fd != -1) {
+        lorieEvent e = { .mouse = { .t = EVENT_MOUSE, .x = x, .y = y, .detail = which_button, .down = button_down, .relative = relative } };
+        write(conn_fd, &e, sizeof(e));
+        checkConnection(env);
+    }
+}
+
+JNIEXPORT void JNICALL
+Java_com_termux_x11_LorieView_sendTouchEvent(unused JNIEnv* env, unused jobject cls, jint action, jint id, jint x, jint y) {
+    if (conn_fd != -1 && action != -1) {
+        lorieEvent e = { .touch = { .t = EVENT_TOUCH, .type = action, .id = id, .x = x, .y = y } };
+        write(conn_fd, &e, sizeof(e));
+        checkConnection(env);
     }
 }
 
 JNIEXPORT jboolean JNICALL
-Java_com_termux_x11_MainActivity_sendKeyEvent(unused JNIEnv* env, unused jobject cls, jint scan_code, jint key_code, jboolean key_down) {
-    if (conn) {
+Java_com_termux_x11_LorieView_sendKeyEvent(unused JNIEnv* env, unused jobject cls, jint scan_code, jint key_code, jboolean key_down) {
+    if (conn_fd != -1) {
         int code = (scan_code) ?: android_to_linux_keycode[key_code];
         log(DEBUG, "Sending key: %d", code + 8);
-        xcb_tx11_key_event(conn, code + 8, key_down);
-        xcb_flush(conn);
+        lorieEvent e = { .key = { .t = EVENT_KEY, .key = code + 8, .state = key_down } };
+        write(conn_fd, &e, sizeof(e));
+        checkConnection(env);
     }
 
     return true;
 }
 
 JNIEXPORT void JNICALL
-Java_com_termux_x11_MainActivity_sendTextEvent(JNIEnv *env, unused jobject thiz, jstring text) {
-    if (conn && text) {
+Java_com_termux_x11_LorieView_sendTextEvent(JNIEnv *env, unused jobject thiz, jstring text) {
+    if (conn_fd != -1 && text) {
         char *str = (char*) (*env)->GetStringUTFChars(env, text, NULL);
         char *p = str;
         mbstate_t state = { 0 };
@@ -492,70 +525,36 @@ Java_com_termux_x11_MainActivity_sendTextEvent(JNIEnv *env, unused jobject thiz,
                 break;
 
             log(DEBUG, "Sending unicode event: %lc (U+%X)", wc, wc);
-            xcb_tx11_unicode_event(conn, wc);
+            lorieEvent e = { .unicode = { .t = EVENT_UNICODE, .code = wc } };
+            write(conn_fd, &e, sizeof(e));
             p += len;
+            usleep(30000);
         }
 
-        xcb_flush(conn);
         (*env)->ReleaseStringUTFChars(env, text, str);
+        checkConnection(env);
     }
 }
 
-static JavaVM *vm;
-static jclass system_cls;
-static jmethodID exit_mid;
+JNIEXPORT void JNICALL
+Java_com_termux_x11_LorieView_sendUnicodeEvent(JNIEnv *env, unused jobject thiz, jint code) {
+    if (conn_fd != -1) {
+        log(DEBUG, "Sending unicode event: %lc (U+%X)", code, code);
+        lorieEvent e = { .unicode = { .t = EVENT_UNICODE, .code = code } };
+        write(conn_fd, &e, sizeof(e));
 
-jint JNI_OnLoad(JavaVM *jvm, unused void *reserved) {
-    JNIEnv* env;
-    vm = jvm;
-    (*vm)->AttachCurrentThread(vm, &env, NULL);
-    system_cls = (jclass) (*env)->NewGlobalRef(env, (*env)->FindClass(env, "java/lang/System"));
-    exit_mid = (*env)->GetStaticMethodID(env, system_cls, "exit", "(I)V");
-    init_module();
-    return JNI_VERSION_1_6;
+        checkConnection(env);
+    }
 }
 
 void abort(void) {
-    JNIEnv* env;
-    (*vm)->AttachCurrentThread(vm, &env, NULL);
-    (*env)->CallStaticVoidMethod(env, system_cls, exit_mid, 134);
-    while(true)
-        sleep(1);
+    _exit(134);
 }
 
 void exit(int code) {
-    JNIEnv* env;
-    (*vm)->AttachCurrentThread(vm, &env, NULL);
-    (*env)->CallStaticVoidMethod(env, system_cls, exit_mid, code);
-    while(true)
-        sleep(1);
+    _exit(code);
 }
 
-#if 1
-bool enabled = true;
-#define no_instrument void __attribute__((no_instrument_function)) __attribute__ ((visibility ("default")))
-
-static _Thread_local int level = -1;
-no_instrument print_func(void *func, int enter) {
-    Dl_info info;
-    if (!dladdr(func, &info) || !info.dli_sname)
-        return;
-
-    log(DEBUG, "%d%*c%s %s", gettid(), level, ' ', enter ? ">" : "<", info.dli_sname);
-}
-
-unused no_instrument __cyg_profile_func_enter (void *func, unused void* caller) { // NOLINT(bugprone-reserved-identifier)
-    level++;
-    print_func(func, 1);
-}
-
-unused no_instrument __cyg_profile_func_exit (void *func, unused void* caller) { // NOLINT(bugprone-reserved-identifier)
-    print_func(func, 0);
-    level--;
-}
-#endif
-
-// I need this to catch initialisation errors of libxkbcommon.
 #if 1
 // It is needed to redirect stderr to logcat
 static void* stderrToLogcatThread(unused void* cookie) {
@@ -577,10 +576,8 @@ static void* stderrToLogcatThread(unused void* cookie) {
 }
 
 __attribute__((constructor)) static void init(void) {
-    if (!strcmp("com.termux.x11", __progname)) {
-        pthread_t t;
+    pthread_t t;
+    if (!strcmp("com.termux.x11", __progname))
         pthread_create(&t, NULL, stderrToLogcatThread, NULL);
-    }
 }
 #endif
-

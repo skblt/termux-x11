@@ -9,6 +9,8 @@ import android.view.KeyEvent;
 import android.view.MotionEvent;
 import android.view.View;
 
+import androidx.core.math.MathUtils;
+
 import java.util.Set;
 import java.util.TreeSet;
 
@@ -30,73 +32,43 @@ public final class InputEventSender {
     private final Set<Integer> mPressedTextKeys;
 
     public InputEventSender(InputStub injector) {
-        Preconditions.notNull(injector);
+        if (injector == null)
+            throw new NullPointerException();
         mInjector = injector;
         mPressedTextKeys = new TreeSet<>();
     }
 
     public void sendMouseEvent(PointF pos, int button, boolean down, boolean relative) {
-        Preconditions.isTrue(button == InputStub.BUTTON_UNDEFINED
+        if (!(button == InputStub.BUTTON_UNDEFINED
                 || button == InputStub.BUTTON_LEFT
                 || button == InputStub.BUTTON_MIDDLE
-                || button == InputStub.BUTTON_RIGHT);
+                || button == InputStub.BUTTON_RIGHT))
+            throw new IllegalStateException();
         mInjector.sendMouseEvent((int) pos.x, (int) pos.y, button, down, relative);
     }
 
-    public void sendMouseDown(PointF pos, int button) {
-        sendMouseEvent(pos, button, true, false);
+    public void sendMouseDown(int button, boolean relative) {
+        mInjector.sendMouseEvent(0, 0, button, true, relative);
     }
 
-    public void sendMouseUp(PointF pos, int button) {
-        sendMouseEvent(pos, button, false, false);
+    public void sendMouseUp(int button, boolean relative) {
+        mInjector.sendMouseEvent(0, 0, button, false, relative);
     }
 
-    public void sendMouseClick(PointF pos, int button) {
-        sendMouseDown(pos, button);
-        sendMouseUp(pos, button);
+    public void sendMouseClick(int button, boolean relative) {
+        mInjector.sendMouseEvent(0, 0, button, true, relative);
+        mInjector.sendMouseEvent(0, 0, button, false, relative);
     }
 
-    public void sendCursorMove(PointF pos) {
-        sendMouseUp(pos, InputStub.BUTTON_UNDEFINED);
-    }
-
-    // TODO(zijiehe): This function will be eventually removed after {@link InputStrategyInterface}
-    // has been deprecated.
-    public void sendCursorMove(float x, float y) {
-        sendCursorMove(new PointF(x, y));
+    public void sendCursorMove(float x, float y, boolean relative) {
+        mInjector.sendMouseEvent(x, y, InputStub.BUTTON_UNDEFINED, false, relative);
     }
 
     public void sendMouseWheelEvent(float distanceX, float distanceY) {
         mInjector.sendMouseWheelEvent(distanceX, distanceY);
     }
 
-    public void sendReverseMouseWheelEvent(float distanceX, float distanceY) {
-        sendMouseWheelEvent(-distanceX, -distanceY);
-    }
-
-    /**
-     * Converts an Android MotionEvent masked action value into the corresponding
-     * native touch event value.
-     */
-    public static int eventTypeFromMaskedAction(int action) {
-        switch (action) {
-            case MotionEvent.ACTION_DOWN:
-            case MotionEvent.ACTION_POINTER_DOWN:
-                return XI_TouchBegin;
-
-            case MotionEvent.ACTION_MOVE:
-                return XI_TouchUpdate;
-
-            case MotionEvent.ACTION_UP:
-            case MotionEvent.ACTION_POINTER_UP:
-            case MotionEvent.ACTION_CANCEL:
-                return XI_TouchEnd;
-
-            default:
-                return -1;
-        }
-    }
-
+    final boolean[] pointers = new boolean[10];
     /**
      * Extracts the touch point data from a MotionEvent, converts each point into a marshallable
      * object and passes the set of points to the JNI layer to be transmitted to the remote host.
@@ -105,30 +77,43 @@ public final class InputEventSender {
      *              updated to represent the remote machine's coordinate system before calling this
      *              function.
      */
-    public void sendTouchEvent(MotionEvent event) {
+    public void sendTouchEvent(MotionEvent event, RenderData renderData) {
         int action = event.getActionMasked();
-        int touchEventType = eventTypeFromMaskedAction(action);
 
-        if (action == MotionEvent.ACTION_MOVE) {
+        if (action == MotionEvent.ACTION_MOVE || action == MotionEvent.ACTION_HOVER_MOVE || action == MotionEvent.ACTION_HOVER_ENTER || action == MotionEvent.ACTION_HOVER_EXIT) {
             // In order to process all of the events associated with an ACTION_MOVE event, we need
             // to walk the list of historical events in order and add each event to our list, then
             // retrieve the current move event data.
             int pointerCount = event.getPointerCount();
 
             for (int p = 0; p < pointerCount; p++)
-                mInjector.sendTouchEvent(touchEventType, event.getPointerId(p), (int) event.getX(p), (int) event.getY(p));
+                pointers[event.getPointerId(p)] = false;
+
+            for (int p = 0; p < pointerCount; p++) {
+                int x = MathUtils.clamp((int) (event.getX(p) * renderData.scale.x), 0, renderData.screenWidth);
+                int y = MathUtils.clamp((int) (event.getY(p) * renderData.scale.y), 0, renderData.screenHeight);
+                pointers[event.getPointerId(p)] = true;
+                mInjector.sendTouchEvent(XI_TouchUpdate, event.getPointerId(p), x, y);
+            }
+
+            // Sometimes Android does not send ACTION_POINTER_UP/ACTION_UP so some pointers are "stuck" in pressed state.
+            for (int p = 0; p < 10; p++) {
+                if (!pointers[p])
+                    mInjector.sendTouchEvent(XI_TouchEnd, p, 0, 0);
+            }
         } else {
             // For all other events, we only want to grab the current/active pointer.  The event
             // contains a list of every active pointer but passing all of of these to the host can
             // cause confusion on the remote OS side and result in broken touch gestures.
             int activePointerIndex = event.getActionIndex();
             int id = event.getPointerId(activePointerIndex);
-            int x = (int) event.getX(activePointerIndex);
-            int y = (int) event.getY(activePointerIndex);
-            mInjector.sendTouchEvent(touchEventType, id, x, y);
+            int x =  MathUtils.clamp((int) (event.getX(activePointerIndex) * renderData.scale.x), 0, renderData.screenWidth);
+            int y =  MathUtils.clamp((int) (event.getY(activePointerIndex) * renderData.scale.y), 0, renderData.screenHeight);
+            int a = (action == MotionEvent.ACTION_DOWN || action == MotionEvent.ACTION_POINTER_DOWN) ? XI_TouchBegin : XI_TouchEnd;
+            if (a == XI_TouchEnd)
+                mInjector.sendTouchEvent(XI_TouchUpdate, id, x, y);
+            mInjector.sendTouchEvent(a, id, x, y);
         }
-
-        mInjector.sendTouchEvent(-1, 0, 0, 0);
     }
 
     /**
@@ -163,8 +148,7 @@ public final class InputEventSender {
 
             if (pressed && unicode != 0 && no_modifiers) {
                 mPressedTextKeys.add(keyCode);
-                int[] codePoints = {unicode};
-                mInjector.sendTextEvent(new String(codePoints, 0, 1));
+                mInjector.sendUnicodeEvent(unicode);
                 return true;
             }
 

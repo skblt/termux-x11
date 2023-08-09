@@ -1,6 +1,7 @@
 package com.termux.x11;
 
 import static android.system.Os.getuid;
+import static android.system.Os.getenv;
 
 import android.annotation.SuppressLint;
 import android.app.IActivityManager;
@@ -18,14 +19,19 @@ import android.os.ParcelFileDescriptor;
 import android.util.Log;
 import android.view.Surface;
 
+import androidx.annotation.Keep;
+
 import java.io.DataInputStream;
+import java.io.OutputStream;
+import java.io.PrintStream;
+import java.net.ConnectException;
 import java.net.InetAddress;
 import java.net.ServerSocket;
 import java.net.Socket;
 import java.net.URL;
 import java.util.Arrays;
 
-@SuppressLint({"StaticFieldLeak", "UnsafeDynamicallyLoadedCode"})
+@Keep @SuppressLint({"StaticFieldLeak", "UnsafeDynamicallyLoadedCode"})
 public class CmdEntryPoint extends ICmdEntryInterface.Stub {
     public static final String ACTION_START = "com.termux.x11.CmdEntryPoint.ACTION_START";
     public static final int PORT = 7892;
@@ -45,8 +51,14 @@ public class CmdEntryPoint extends ICmdEntryInterface.Stub {
 
     CmdEntryPoint(String[] args) {
         try {
-            if (ctx == null)
+            if (ctx == null) {
+                // Hiding harmless framework errors, like this:
+                // java.io.FileNotFoundException: /data/system/theme_config/theme_compatibility.xml: open failed: ENOENT (No such file or directory)
+                PrintStream err = System.err;
+                System.setErr(new PrintStream(new OutputStream() { public void write(int arg0) {} }));
                 ctx = android.app.ActivityThread.systemMain().getSystemContext();
+                System.setErr(err);
+            }
         } catch (Exception e) {
             Log.e("CmdEntryPoint", "Problem during obtaining Context: ", e);
         }
@@ -60,6 +72,9 @@ public class CmdEntryPoint extends ICmdEntryInterface.Stub {
 
     @SuppressLint({"WrongConstant", "PrivateApi"})
     void sendBroadcast() {
+        String targetPackage = getenv("TERMUX_X11_OVERRIDE_PACKAGE");
+        if (targetPackage == null)
+            targetPackage = "com.termux.x11";
         // We should not care about multiple instances, it should be called only by `Termux:X11` app
         // which is single instance...
         Bundle bundle = new Bundle();
@@ -67,7 +82,7 @@ public class CmdEntryPoint extends ICmdEntryInterface.Stub {
 
         Intent intent = new Intent(ACTION_START);
         intent.putExtra("", bundle);
-        intent.setPackage("com.termux.x11");
+        intent.setPackage(targetPackage);
 
         if (getuid() == 0 || getuid() == 2000)
             intent.setFlags(0x00400000 /* FLAG_RECEIVER_FROM_SHELL */);
@@ -95,15 +110,12 @@ public class CmdEntryPoint extends ICmdEntryInterface.Stub {
             assert am != null;
             IIntentSender sender = am.getIntentSender(1, packageName, null, null, 0, new Intent[] { intent },
                     null, PendingIntent.FLAG_CANCEL_CURRENT | PendingIntent.FLAG_ONE_SHOT, null, 0);
-            IIntentReceiver.Stub receiver = new IIntentReceiver.Stub() {
-                @Override public void performReceive(Intent intent, int resultCode, String data, Bundle extras, boolean ordered, boolean sticky, int sendingUser) {}
-            };
             try {
                 //noinspection JavaReflectionMemberAccess
                 IIntentSender.class
                         .getMethod("send", int.class, Intent.class, String.class, IBinder.class, IIntentReceiver.class, String.class, Bundle.class)
                         .invoke(sender, 0, intent, null, null, new IIntentReceiver.Stub() {
-                            @Override public void performReceive(Intent intent, int resultCode, String data, Bundle extras, boolean ordered, boolean sticky, int sendingUser) {}
+                            @Override public void performReceive(Intent i, int r, String d, Bundle e, boolean o, boolean s, int a) {}
                         }, null, null);
             } catch (Exception ex) {
                 throw new RuntimeException(ex);
@@ -135,11 +147,11 @@ public class CmdEntryPoint extends ICmdEntryInterface.Stub {
                             sendBroadcast();
                         }
                     } catch (Exception e) {
-                        e.printStackTrace();
+                        e.printStackTrace(System.err);
                     }
                 }
             } catch (Exception e) {
-                e.printStackTrace();
+                e.printStackTrace(System.err);
             }
         }).start();
     }
@@ -147,8 +159,13 @@ public class CmdEntryPoint extends ICmdEntryInterface.Stub {
     public static void requestConnection() {
         System.err.println("Requesting connection...");
         new Thread(() -> { // New thread is needed to avoid android.os.NetworkOnMainThreadException
-            try (Socket socket = new Socket("127.0.0.1", CmdEntryPoint.PORT)){
+            try (Socket socket = new Socket("127.0.0.1", CmdEntryPoint.PORT)) {
                 socket.getOutputStream().write(CmdEntryPoint.MAGIC);
+            } catch (ConnectException e) {
+                if (e.getMessage() != null && e.getMessage().contains("Connection refused")) {
+                    Log.e("CmdEntryPoint", "ECONNREFUSED: Connection has been refused by the server");
+                } else
+                    Log.e("CmdEntryPoint", "Something went wrong when we requested connection", e);
             } catch (Exception e) {
                 Log.e("CmdEntryPoint", "Something went wrong when we requested connection", e);
             }
@@ -161,25 +178,28 @@ public class CmdEntryPoint extends ICmdEntryInterface.Stub {
     public native ParcelFileDescriptor getLogcatOutput();
 
     static {
-        try {
-            System.loadLibrary("Xlorie");
-        } catch (UnsatisfiedLinkError e) {
-            // It is executed directly from command line, without shell-loader
-            String path = "lib/" + Build.SUPPORTED_ABIS[0] + "/libXlorie.so";
-            ClassLoader loader = CmdEntryPoint.class.getClassLoader();
-            URL res = loader != null ? loader.getResource(path) : null;
-            String libPath = res != null ? res.getFile().replace("file:", "") : null;
-            if (libPath != null) {
-                try {
-                    Looper.prepareMainLooper();
-                    System.load(libPath);
-                } catch (Exception e2) {
-                    e.printStackTrace(System.err);
-                    e2.printStackTrace(System.err);
-                }
-            } else e.printStackTrace(System.err);
+        String path = "lib/" + Build.SUPPORTED_ABIS[0] + "/libXlorie.so";
+        ClassLoader loader = CmdEntryPoint.class.getClassLoader();
+        URL res = loader != null ? loader.getResource(path) : null;
+        String libPath = res != null ? res.getFile().replace("file:", "") : null;
+        if (libPath != null) {
+            try {
+                System.load(libPath);
+            } catch (Exception e) {
+                Log.e("CmdEntryPoint", "Failed to dlopen " + libPath, e);
+                System.err.println("Failed to load native library. Did you install the right apk? Try the universal one.");
+                System.exit(134);
+            }
+        } else {
+            // It is critical only when it is not running in Android application process
+            if (MainActivity.getInstance() == null) {
+                System.err.println("Failed to acquire native library. Did you install the right apk? Try the universal one.");
+                System.exit(134);
+            }
         }
 
+        if (Looper.getMainLooper() == null)
+            Looper.prepareMainLooper();
         handler = new Handler();
     }
 }

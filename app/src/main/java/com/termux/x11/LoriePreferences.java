@@ -6,7 +6,6 @@ import static android.content.pm.PackageManager.PERMISSION_DENIED;
 import static android.content.pm.PackageManager.PERMISSION_GRANTED;
 
 import android.annotation.SuppressLint;
-import android.app.Dialog;
 import android.content.Intent;
 import android.content.SharedPreferences;
 import android.graphics.Typeface;
@@ -16,7 +15,6 @@ import android.os.Bundle;
 import androidx.annotation.NonNull;
 import androidx.core.app.ActivityCompat;
 import androidx.core.content.ContextCompat;
-import androidx.fragment.app.DialogFragment;
 import androidx.preference.Preference;
 
 import android.os.Handler;
@@ -41,7 +39,6 @@ import android.widget.EditText;
 import android.widget.TextView;
 import android.widget.Toast;
 
-import com.termux.x11.utils.ExtraKeyConfigPreference;
 import com.termux.x11.utils.KeyInterceptor;
 import com.termux.x11.utils.SamsungDexUtils;
 import com.termux.x11.utils.TermuxX11ExtraKeys;
@@ -51,7 +48,6 @@ import java.util.regex.PatternSyntaxException;
 
 @SuppressWarnings("deprecation")
 public class LoriePreferences extends AppCompatActivity {
-
     static final String ACTION_PREFERENCES_CHANGED = "com.termux.x11.ACTION_PREFERENCES_CHANGED";
     static final String SHOW_IME_WITH_HARD_KEYBOARD = "show_ime_with_hard_keyboard";
     LoriePreferenceFragment loriePreferenceFragment;
@@ -132,7 +128,7 @@ public class LoriePreferences extends AppCompatActivity {
             findPreference("displayResolutionMode").setSummary(p.getString("displayResolutionMode", "native"));
             findPreference("displayResolutionExact").setSummary(p.getString("displayResolutionExact", "1280x1024"));
             findPreference("displayResolutionCustom").setSummary(p.getString("displayResolutionCustom", "1280x1024"));
-            findPreference("displayStretch").setEnabled("exact".equals(p.getString("displayResolutionMode", "native")) || "custom".equals(p.getString("displayResolutionMode", "native")));
+            findPreference("displayStretch").setEnabled("exact".contentEquals(p.getString("displayResolutionMode", "native")) || "custom".contentEquals(p.getString("displayResolutionMode", "native")));
 
             int modeValue = Integer.parseInt(p.getString("touchMode", "1")) - 1;
             String mode = getResources().getStringArray(R.array.touchscreenInputModesEntries)[modeValue];
@@ -152,7 +148,7 @@ public class LoriePreferences extends AppCompatActivity {
             String showImeEnabled = Settings.Secure.getString(requireActivity().getContentResolver(), SHOW_IME_WITH_HARD_KEYBOARD);
             if (showImeEnabled == null) showImeEnabled = "0";
             SharedPreferences.Editor p = Objects.requireNonNull(preferences).edit();
-            p.putBoolean("showIMEWhileExternalConnected", showImeEnabled.equals("1"));
+            p.putBoolean("showIMEWhileExternalConnected", showImeEnabled.contentEquals("1"));
             p.apply();
 
             setListeners(getPreferenceScreen());
@@ -172,12 +168,41 @@ public class LoriePreferences extends AppCompatActivity {
 
         @Override
         public boolean onPreferenceClick(@NonNull Preference preference) {
-            if ("enableAccessibilityService".equals(preference.getKey())) {
+            if ("enableAccessibilityService".contentEquals(preference.getKey())) {
                 Intent intent = new Intent(android.provider.Settings.ACTION_ACCESSIBILITY_SETTINGS);
                 startActivityForResult(intent, 0);
             }
 
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU && "requestNotificationPermission".equals(preference.getKey()))
+            if ("extra_keys_config".contentEquals(preference.getKey())) {
+                @SuppressLint("InflateParams")
+                View view = getLayoutInflater().inflate(R.layout.extra_keys_config, null, false);
+                SharedPreferences preferences = PreferenceManager.getDefaultSharedPreferences(getContext());
+                EditText config = view.findViewById(R.id.extra_keys_config);
+                config.setTypeface(Typeface.MONOSPACE);
+                config.setText(preferences.getString("extra_keys_config", TermuxX11ExtraKeys.DEFAULT_IVALUE_EXTRA_KEYS));
+                TextView desc = view.findViewById(R.id.extra_keys_config_description);
+                desc.setLinksClickable(true);
+                desc.setText(R.string.extra_keys_config_desc);
+                desc.setMovementMethod(LinkMovementMethod.getInstance());
+                new android.app.AlertDialog.Builder(getActivity())
+                        .setView(view)
+                        .setTitle("Extra keys config")
+                        .setPositiveButton("OK",
+                                (dialog, whichButton) -> {
+                                    String text = config.getText().toString();
+                                    text = text.length() > 0 ? text : TermuxX11ExtraKeys.DEFAULT_IVALUE_EXTRA_KEYS;
+                                    preferences
+                                            .edit()
+                                            .putString("extra_keys_config", text)
+                                            .apply();
+                                }
+                        )
+                        .setNegativeButton("Cancel", (dialog, whichButton) -> dialog.dismiss())
+                        .create()
+                        .show();
+            }
+
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU && "requestNotificationPermission".contentEquals(preference.getKey()))
                 ActivityCompat.requestPermissions(requireActivity(), new String[]{ POST_NOTIFICATIONS }, 101);
 
             updatePreferencesLayout();
@@ -191,8 +216,8 @@ public class LoriePreferences extends AppCompatActivity {
             Log.e("Preferences", "changed preference: " + key);
             handler.postDelayed(this::updatePreferencesLayout, 100);
 
-            if ("showIMEWhileExternalConnected".equals(key)) {
-                boolean enabled = newValue.toString().equals("true");
+            if ("showIMEWhileExternalConnected".contentEquals(key)) {
+                boolean enabled = newValue.toString().contentEquals("true");
                 try {
                     Settings.Secure.putString(requireActivity().getContentResolver(), SHOW_IME_WITH_HARD_KEYBOARD, enabled ? "1" : "0");
                 } catch (Exception e) {
@@ -210,7 +235,7 @@ public class LoriePreferences extends AppCompatActivity {
                 }
             }
 
-            if ("displayScale".equals(key)) {
+            if ("displayScale".contentEquals(key)) {
                 int scale = (Integer) newValue;
                 if (scale % 10 != 0) {
                     scale = Math.round( ( (float) scale ) / 10 ) * 10;
@@ -219,7 +244,7 @@ public class LoriePreferences extends AppCompatActivity {
                 }
             }
 
-            if ("displayDensity".equals(key)) {
+            if ("displayDensity".contentEquals(key)) {
                 int v;
                 try {
                     v = Integer.parseInt((String) newValue);
@@ -231,7 +256,7 @@ public class LoriePreferences extends AppCompatActivity {
                 return (v > 96 && v < 800);
             }
 
-            if ("displayResolutionCustom".equals(key)) {
+            if ("displayResolutionCustom".contentEquals(key)) {
                 String value = (String) newValue;
                 try {
                     String[] resolution = value.split("x");
@@ -243,16 +268,15 @@ public class LoriePreferences extends AppCompatActivity {
                 }
             }
 
-            if ("showAdditionalKbd".equals(key)) {
+            if ("showAdditionalKbd".contentEquals(key)) {
                 SharedPreferences preferences = PreferenceManager.getDefaultSharedPreferences(requireContext());
                 SharedPreferences.Editor edit = preferences.edit();
                 edit.putBoolean("additionalKbdVisible", true);
                 edit.commit();
             }
 
-            if ("enableAccessibilityServiceAutomatically".equals(key)) {
-                Boolean value = (Boolean) newValue;
-                if (!value)
+            if ("enableAccessibilityServiceAutomatically".contentEquals(key)) {
+                if (!((Boolean) newValue))
                     KeyInterceptor.shutdown();
                 if (requireContext().checkSelfPermission(WRITE_SECURE_SETTINGS) != PERMISSION_GRANTED) {
                     new AlertDialog.Builder(requireContext())
@@ -275,52 +299,6 @@ public class LoriePreferences extends AppCompatActivity {
             handler.postAtTime(this::updatePreferencesLayout, 100);
             return true;
         }
-
-        @Override
-        public void onDisplayPreferenceDialog(@NonNull Preference preference) {
-            if (preference instanceof ExtraKeyConfigPreference) {
-                ExtraKeysConfigFragment f = new ExtraKeysConfigFragment();
-                f.setTargetFragment(this, 0);
-                assert getFragmentManager() != null;
-                f.show(getFragmentManager(), null);
-            } else super.onDisplayPreferenceDialog(preference);
-        }
-
-        public static class ExtraKeysConfigFragment extends DialogFragment {
-
-            @NonNull
-            @Override
-            public Dialog onCreateDialog(Bundle savedInstanceState) {
-                @SuppressLint("InflateParams")
-                View view = getLayoutInflater().inflate(R.layout.extra_keys_config, null, false);
-                SharedPreferences preferences = PreferenceManager.getDefaultSharedPreferences(getContext());
-                EditText config = view.findViewById(R.id.extra_keys_config);
-                config.setTypeface(Typeface.MONOSPACE);
-                config.setText(preferences.getString("extra_keys_config", TermuxX11ExtraKeys.DEFAULT_IVALUE_EXTRA_KEYS));
-                TextView desc = view.findViewById(R.id.extra_keys_config_description);
-                desc.setLinksClickable(true);
-                desc.setText(R.string.extra_keys_config_desc);
-                desc.setMovementMethod(LinkMovementMethod.getInstance());
-                return new android.app.AlertDialog.Builder(getActivity())
-                        .setView(view)
-                        .setTitle("Extra keys config")
-                        .setPositiveButton("OK",
-                                (dialog, whichButton) -> {
-                                    String text = config.getText().toString();
-                                    text = text.length() > 0 ? text : TermuxX11ExtraKeys.DEFAULT_IVALUE_EXTRA_KEYS;
-                                    preferences
-                                            .edit()
-                                            .putString("extra_keys_config", text)
-                                            .apply();
-                                }
-                        )
-                        .setNegativeButton("Cancel",
-                                (dialog, whichButton) -> dialog.dismiss()
-                        )
-                        .create();
-            }
-        }
-
     }
 
     static Handler handler = new Handler();
