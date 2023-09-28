@@ -28,7 +28,7 @@ file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/xserver/GL")
 file(GENERATE OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/xserver/GL/glext.h" CONTENT "#include <GL/gl.h>")
 add_custom_command(
         OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/xserver/GL/gl.h"
-        COMMAND Python3::Interpreter "${CMAKE_CURRENT_SOURCE_DIR}/lorie/gen_stubs.py"
+        COMMAND Python3::Interpreter "${CMAKE_CURRENT_SOURCE_DIR}/libepoxy/src/gen_dispatch.py"
         "--outputdir=${CMAKE_CURRENT_BINARY_DIR}/xserver/GL" "${CMAKE_CURRENT_SOURCE_DIR}/libepoxy/registry/gl.xml"
         COMMENT "Generating source code (GL/gl.h)"
         VERBATIM)
@@ -275,3 +275,4 @@ target_link_options(Xlorie PRIVATE "-Wl,--as-needed" "-Wl,--no-undefined" "-fvis
 target_link_libraries(Xlorie "-Wl,--whole-archive" ${XSERVER_LIBS} "-Wl,--no-whole-archive" android log m z EGL GLESv2)
 target_compile_options(Xlorie PRIVATE ${compile_options})
 target_apply_patch(Xlorie "${CMAKE_CURRENT_SOURCE_DIR}/xserver" "${CMAKE_CURRENT_SOURCE_DIR}/patches/xserver.patch")
+target_apply_patch(Xlorie "${CMAKE_CURRENT_SOURCE_DIR}/libepoxy" "${CMAKE_CURRENT_SOURCE_DIR}/patches/libepoxy.patch")

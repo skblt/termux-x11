@@ -9,6 +9,7 @@ android {
         targetSdkVersion 33
         versionCode 14
         versionName "1.03.00"
+        buildConfigField "String", "COMMIT", "\"" + ("git rev-parse HEAD\n".execute().getText().trim() ?: (System.getenv('CURRENT_COMMIT') ?: "NO_COMMIT")) + "\""
     }
 
     signingConfigs.debug {
@@ -31,6 +32,7 @@ android {
     externalNativeBuild.cmake.path "src/main/cpp/CMakeLists.txt"
     packagingOptions.jniLibs.useLegacyPackaging false
     buildFeatures.aidl true
+    buildFeatures.buildConfig true
     buildTypes.debug {
         signingConfig signingConfigs.debug
         postprocessing {
@@ -44,8 +46,8 @@ android {
 
 dependencies {
     //noinspection DifferentStdlibGradleVersion
-    implementation "org.jetbrains.kotlin:kotlin-stdlib-jdk8:1.9.0"
-    implementation 'androidx.lifecycle:lifecycle-viewmodel-ktx:2.6.1'
+    implementation "org.jetbrains.kotlin:kotlin-stdlib-jdk8:1.9.10"
+    implementation 'androidx.lifecycle:lifecycle-viewmodel-ktx:2.6.2'
     implementation 'androidx.preference:preference:1.2.1'
     compileOnly project(':shell-loader:stub')
 }

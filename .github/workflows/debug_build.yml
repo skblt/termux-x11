@@ -15,14 +15,6 @@ on:
       - 'img/**'
 
 jobs:
-  validation:
-    name: "Validation"
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v3
-        with:
-          submodules: recursive
-      - uses: gradle/wrapper-validation-action@v1
   build:
     name: "Build"
     runs-on: ubuntu-latest
@@ -31,10 +23,14 @@ jobs:
       run: |
         sudo apt update && sudo apt install -y libarchive-tools binutils-aarch64-linux-gnu binutils-arm-linux-gnueabihf
     - name: Clone repository
-      uses: actions/checkout@v3
+      uses: actions/checkout@v4
       with:
         submodules: recursive
-    - uses: actions/setup-java@v3
+    - name: Validation
+      uses: gradle/wrapper-validation-action@v1
+      
+    - name: Java setup
+      uses: actions/setup-java@v3
       with:
         distribution: 'temurin'
         java-version: '17'
@@ -51,14 +47,11 @@ jobs:
             ${{ runner.os }}-gradle-
 
     - name: Build
-      run: |
-        ./gradlew assembleDebug
+      run: ./gradlew assembleDebug
     - name: Build companion package
-      run: |
-        ./build_termux_package
+      run: ./build_termux_package
     - name: Copy loader to target directory
-      run: |
-        cp ./shell-loader/build/outputs/apk/debug/shell-loader-debug.apk ./app/build/outputs/apk/debug/shell-loader-nightly.apk
+      run:  cp ./shell-loader/build/outputs/apk/debug/shell-loader-debug.apk ./app/build/outputs/apk/debug/shell-loader-nightly.apk
     - name: Store app-arm64-v8a-debug
       uses: actions/upload-artifact@v3
       with:
@@ -103,4 +96,23 @@ jobs:
       with:
         name: termux-x11-unstripped-libraries-for-ndk-stack
         path: ./app/build/intermediates/cxx/Debug/*
-    
+
+    - name: Update Nightly Release
+      uses: andelf/nightly-release@main
+      if: github.repository == 'termux/termux-x11' && github.ref == 'refs/heads/master'
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        tag_name: nightly
+        name: 'Nightly Release $$'
+        draft: false
+        prerelease: true
+        body: |
+          This is a nightly release of the termux-x11 app.
+          It's unstable compared to the official releases, **use it with caution**!
+          Based on ${{ github.sha }}
+        files: |
+          ./app/build/outputs/apk/debug/app-*-debug.apk
+          ./app/build/outputs/apk/debug/shell-loader-nightly.apk
+          ./app/build/outputs/apk/debug/termux-x11-*-all.deb
+          ./app/build/outputs/apk/debug/termux-x11-*-any.pkg.tar.xz

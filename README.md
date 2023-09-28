@@ -25,6 +25,7 @@ or
 Just like any other X server.
 
 ## Setup Instructions
+Application runs only on Android 8+ devices.
 For this one you must enable the `x11-repo` repository can be done by executing `pkg install x11-repo` command
 
 For X applications to work, you must install Termux-x11 companion package. You can do that by downloading an artifact from [last successful build](https://github.com/termux/termux-x11/actions/workflows/debug_build.yml) and installing `termux-x11-*-debug.apk` (according to device `architecture`, universal if you are doubting) and `*.deb` (if you use termux with `pkg`) or `*.tar.xz` (if you use termux with `pacman`) files from `termux-companion packages` artifact (do not try to install `shell-loader-nightly.apk` as Android application, it is not intended to be installed, it is only for chroot users).
@@ -93,17 +94,17 @@ You can access preferences menu three ways:
 <details>
 <summary>By clicking "PREFERENCES" button on main screen when no client connected.</summary>
 
-![image](./img/1.jpg)
+![image](./.github/static/1.jpg)
 </details>
 <details>
 <summary>By clicking "Preferences" button in notification, if available.</summary>
 
-![image](./img/2.jpg)
+![image](./.github/static/2.jpg)
 </details>
 <details>
 <summary>By clicking "Preferences" application shortcut (long tap `Termux:X11` icon in launcher). </summary>
 
-![image](./img/3.jpg)
+![image](./.github/static/3.jpg)
 </details>
 
 ## Touch gestures
@@ -116,9 +117,10 @@ In touchpad emulation mode you can use the following gestures:
 * Two-finger vertical swipe for vertical scroll
 * Two-finger horizontal swipe for horizontal scroll
 * Three-finger swipe down to show-hide additional keys bar.
-### Mouse emulation mode.
-In mouse emulation mode you can use the following gestures:
-* Mouse is in click mode as long as you hold finger on a screen.
+### Simulated touchscreen mode.
+In simulated touchscreen mode you can use the following gestures:
+* Single tap for left button click.
+* Long tap for mouse holding.
 * Double tap for double click
 * Two-finger tap for right click
 * Three-finger tap for middle click
@@ -133,7 +135,7 @@ You can fix this in your window manager settings (in the case of xfce4 and lxqt 
 <details>
 <summary> Screenshot </summary>
 
-![image](./img/dpi-scale.png) 
+![image](./.github/static/dpi-scale.png) 
 </details>
 
 Also you can start `termux-x11` with `-dpi` option.
