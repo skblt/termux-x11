@@ -27,7 +27,7 @@ jobs:
       with:
         submodules: recursive
     - name: Validation
-      uses: gradle/wrapper-validation-action@v1
+      uses: gradle/wrapper-validation-action@v2
       
     - name: Java setup
       uses: actions/setup-java@v4
@@ -36,7 +36,7 @@ jobs:
         java-version: '17'
         
     - name: Restore cache
-      uses: actions/cache@v3
+      uses: actions/cache@v4
       with:
           path: |
             ~/.gradle/caches

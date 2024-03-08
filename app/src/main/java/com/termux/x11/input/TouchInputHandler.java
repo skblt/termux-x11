@@ -216,8 +216,8 @@ public class TouchInputHandler {
     }
 
     private void resetTransformation() {
-        float sx = (float) mRenderData.screenWidth / mRenderData.imageWidth;
-        float sy = (float) mRenderData.screenHeight / mRenderData.imageHeight;
+        float sx = (float) mRenderData.screenWidth / (float) mRenderData.imageWidth;
+        float sy = (float) mRenderData.screenHeight / (float) mRenderData.imageHeight;
         mRenderData.scale.set(sx, sy);
     }
 
@@ -225,12 +225,12 @@ public class TouchInputHandler {
         mRenderData.screenWidth = w;
         mRenderData.screenHeight = h;
 
-        resetTransformation();
-
         if (mTouchpadHandler != null)
             mTouchpadHandler.handleClientSizeChanged(w, h);
 
         moveCursorToScreenPoint((float) w / 2, (float) h / 2);
+
+        resetTransformation();
     }
 
     public void handleHostSizeChanged(int w, int h) {
@@ -239,10 +239,10 @@ public class TouchInputHandler {
 //        mPanGestureBounds = new Rect(mEdgeSlopInPx, mEdgeSlopInPx, w - mEdgeSlopInPx, h - mEdgeSlopInPx);
         moveCursorToScreenPoint((float) w/2, (float) h/2);
 
-        resetTransformation();
-
         if (mTouchpadHandler != null)
             mTouchpadHandler.handleHostSizeChanged(w, h);
+
+        resetTransformation();
     }
 
     public void setInputMode(@InputMode int inputMode) {
@@ -266,9 +266,13 @@ public class TouchInputHandler {
         mInjector.pointerCapture = enabled;
     }
 
+    public void setApplyDisplayScaleFactorToTouchpad(boolean enabled) {
+        mInjector.scaleTouchpad = enabled;
+    }
+
     private void moveCursorByOffset(float deltaX, float deltaY) {
         if (mInputStrategy instanceof InputStrategyInterface.TrackpadInputStrategy)
-            mInjector.sendCursorMove((int) -deltaX, (int) -deltaY, true);
+            mInjector.sendCursorMove(-deltaX, -deltaY, true);
         else if (mInputStrategy instanceof InputStrategyInterface.SimulatedTouchInputStrategy) {
             PointF cursorPos = mRenderData.getCursorPosition();
             cursorPos.offset(-deltaX, -deltaY);
@@ -342,8 +346,13 @@ public class TouchInputHandler {
             if (pointerCount != 1 || mSuppressCursorMovement)
                 return false;
 
-            if (mInputStrategy instanceof InputStrategyInterface.TrackpadInputStrategy)
-                moveCursorByOffset(distanceX * mRenderData.scale.x, distanceY * mRenderData.scale.y);
+            if (mInputStrategy instanceof InputStrategyInterface.TrackpadInputStrategy) {
+                if (mInjector.scaleTouchpad) {
+                    distanceX *= mRenderData.scale.x;
+                    distanceY *= mRenderData.scale.y;
+                }
+                moveCursorByOffset(distanceX, distanceY);
+            }
             if (!(mInputStrategy instanceof InputStrategyInterface.TrackpadInputStrategy) && mIsDragging) {
                 // Ensure the cursor follows the user's finger when the user is dragging under
                 // direct input mode.
